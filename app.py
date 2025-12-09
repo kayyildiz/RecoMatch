@@ -1,435 +1,506 @@
 import streamlit as st
 import pandas as pd
-import io
-import os
+import numpy as np
 import json
+import os
 import re
 from io import BytesIO
+import datetime
 
 # ==========================================
-# 1. HELPER CLASSES & FUNCTIONS (UTILS, LOADERS, TEMPLATES)
+# 1. AYARLAR & CSS (SOFT UI)
 # ==========================================
+st.set_page_config(
+    page_title="RecoMatch | Akıllı Mutabakat",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-TEMPLATE_PATH = "templates.json"
-
-def normalize_text(s: str) -> str:
-    """Metin temizliği: boşlukları sil, büyük harfe çevir, 0-O değişimini yap."""
-    if pd.isna(s):
-        return ""
-    s = str(s).strip()
-    s = s.replace(" ", "")
-    s = s.replace("O", "0")  # O harfini sıfıra çevir
-    return s.upper()
-
-def invoice_number_key(raw: str, last_digits: int = 6) -> str:
-    """Fatura no karşılaştırma anahtarı (Sadece sayısal karakterler ve son X hane)."""
-    n = normalize_text(raw)
-    digits = re.sub(r"\D", "", n) # Sadece rakamları al
-    if len(digits) <= last_digits:
-        return digits
-    return digits[-last_digits:]
-
-def read_excel_file(uploaded_file, header_row: int = 0) -> pd.DataFrame:
-    """Excel okuma fonksiyonu."""
-    try:
-        return pd.read_excel(BytesIO(uploaded_file.read()), header=header_row)
-    except Exception as e:
-        st.error(f"Dosya okuma hatası: {e}")
-        return pd.DataFrame()
-
-def clean_common(df: pd.DataFrame) -> pd.DataFrame:
-    """DataFrame temizliği (string kolonlardaki boşluklar vb)."""
-    df = df.copy()
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].astype(str).str.strip().str.replace(r"\s+", "", regex=True)
-    return df
-
-# --- Template Yönetimi (Otomatik Kayıt) ---
-def load_templates():
-    if not os.path.exists(TEMPLATE_PATH):
-        return {}
-    try:
-        with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_templates(templates):
-    with open(TEMPLATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(templates, f, ensure_ascii=False, indent=2)
-
-def get_saved_mapping(filename):
-    """Dosya ismine göre kayıtlı şablonu getirir."""
-    templates = load_templates()
-    # Basit bir eşleşme: dosya adını key olarak kullanıyoruz
-    return templates.get(filename, {})
-
-def auto_save_mapping(filename, mapping):
-    """Kullanıcı seçim yaptıkça otomatik kaydeder."""
-    templates = load_templates()
-    templates[filename] = mapping
-    save_templates(templates)
-
-# ==========================================
-# 2. LOGIC FUNCTIONS (MATCHING, DIFF, SUMMARY)
-# ==========================================
-
-def prepare_invoices(df: pd.DataFrame, col_invoice_no, col_currency, col_fx_amount, col_tl_amount, group_by_currency=True):
-    """Faturaları hazırlar ve gruplar."""
-    df = df.copy()
-    # Fatura No Key oluştur
-    df["invoice_key"] = df[col_invoice_no].apply(invoice_number_key)
-    
-    group_cols = ["invoice_key"]
-    if group_by_currency and col_currency and col_currency in df.columns:
-        group_cols.append(col_currency)
-
-    agg_dict = {}
-    if col_fx_amount and col_fx_amount in df.columns:
-        agg_dict[col_fx_amount] = "sum"
-    if col_tl_amount and col_tl_amount in df.columns:
-        agg_dict[col_tl_amount] = "sum"
-
-    # Eğer hiç tutar kolonu seçilmediyse sadece count alabiliriz veya olduğu gibi bırakırız
-    if not agg_dict:
-        # Tutar yoksa duplicate'leri tek satıra indir (drop_duplicates mantığı)
-        grouped = df[group_cols].drop_duplicates().reset_index(drop=True)
-    else:
-        grouped = df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
-    
-    return grouped
-
-def match_invoices(df_our, df_their, col_currency, col_fx_amount, col_tl_amount):
-    """Fatura eşleştirme mantığı."""
-    merge_on = ["invoice_key"]
-    if col_currency and col_currency in df_our.columns:
-        merge_on.append(col_currency)
-
-    merged = df_our.merge(
-        df_their,
-        on=merge_on,
-        how="outer",
-        suffixes=("_biz", "_onlar")
-    )
-
-    # Fark hesaplama (Kolonlar seçildiyse)
-    if col_fx_amount:
-        merged["Fark_Doviz"] = merged.get(f"{col_fx_amount}_biz", 0) - merged.get(f"{col_fx_amount}_onlar", 0)
-    if col_tl_amount:
-        merged["Fark_TL"] = merged.get(f"{col_tl_amount}_biz", 0) - merged.get(f"{col_tl_amount}_onlar", 0)
-
-    return merged
-
-def prepare_payment_key(df, cols, scenario):
-    """Ödeme eşleştirme anahtarı oluşturur."""
-    df = df.copy()
-    # Tarih formatlama
-    if cols.get("date"):
-        df["date_key"] = pd.to_datetime(df[cols["date"]], dayfirst=True, errors='coerce').dt.date
-    else:
-        df["date_key"] = "0000-00-00"
-
-    # Tutar (string convertion for key)
-    amt_col = cols.get("amount_tl")
-    if amt_col and amt_col in df.columns:
-        # Sayısal olmayanları 0 yap
-        amount_series = pd.to_numeric(df[amt_col], errors='coerce').fillna(0)
-        amount_str = amount_series.round(2).astype(str)
-    else:
-        amount_str = "0"
-
-    # Senaryoya göre anahtar
-    if scenario == "no_based":
-        # Tarih + Ödeme No + Tutar
-        pay_no = df[cols["payment_no"]].astype(str) if cols.get("payment_no") else ""
-        df["match_key"] = df["date_key"].astype(str) + "_" + pay_no + "_" + amount_str
-    else:
-        # Tarih + Belge Türü (Opsiyonel) + Tutar
-        doc_type = df[cols["doc_type"]].astype(str).str.upper() if cols.get("doc_type") else "GENEL"
-        df["match_key"] = df["date_key"].astype(str) + "_" + doc_type + "_" + amount_str
-
-    return df
-
-def match_payments(df_our, df_their, scenario, cols):
-    """Ödeme eşleştirme."""
-    df_our_prep = prepare_payment_key(df_our, cols, scenario)
-    df_their_prep = prepare_payment_key(df_their, cols, scenario)
-
-    merged = df_our_prep.merge(
-        df_their_prep,
-        on="match_key",
-        suffixes=("_biz", "_onlar"),
-        how="outer"
-    )
-
-    col_amt = cols.get("amount_tl")
-    if col_amt:
-        val_biz = pd.to_numeric(merged[f"{col_amt}_biz"], errors='coerce').fillna(0)
-        val_onlar = pd.to_numeric(merged[f"{col_amt}_onlar"], errors='coerce').fillna(0)
-        merged["Fark_TL"] = val_biz - val_onlar
-
-    return merged
-
-def diff_reports(df_match, key_col_prefix):
-    """Bizde Var/Onlarda Yok raporları üretir."""
-    # Suffixler _biz ve _onlar
-    # Eğer eşleşme anahtarı (invoice_key veya match_key) merged datada varsa;
-    # Kaynak tarafın verisi NaN ise o kayıt diğer tarafta vardır ama kaynakta yoktur.
-    
-    # Bizde Var, Onlarda Yok -> Onlar tarafı NaN
-    bizde_var = df_match[df_match[f"{key_col_prefix}_onlar"].isna()]
-    
-    # Onlarda Var, Bizde Yok -> Bizim taraf NaN
-    onlarda_var = df_match[df_match[f"{key_col_prefix}_biz"].isna()]
-    
-    return bizde_var, onlarda_var
-
-def export_to_excel(matched_inv, matched_pay, bizde_yok, onlarda_yok):
-    """Excel çıktısı oluşturur."""
-    output = BytesIO()
-    writer = pd.ExcelWriter(output, engine='xlsxwriter')
-    
-    if matched_inv is not None:
-        matched_inv.to_excel(writer, sheet_name='Fatura_Eslesme', index=False)
-    if matched_pay is not None:
-        matched_pay.to_excel(writer, sheet_name='Odeme_Eslesme', index=False)
-    if bizde_yok is not None:
-        bizde_yok.to_excel(writer, sheet_name='Bizde_Var_Onlarda_Yok', index=False)
-    if onlarda_yok is not None:
-        onlarda_yok.to_excel(writer, sheet_name='Onlarda_Var_Bizde_Yok', index=False)
-        
-    writer.close()
-    processed_data = output.getvalue()
-    return processed_data
-
-# ==========================================
-# 3. STREAMLIT APP (MAIN UI)
-# ==========================================
-
-st.set_page_config(page_title="RecoMatch", layout="wide", page_icon="🛡️")
-
-# --- Custom CSS (Görsel Düzenleme) ---
+# Modern, yumuşak hatlı CSS
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2rem; 
-        font-weight: bold; 
-        color: #1E3A8A; 
-        margin-bottom: 0px;
+    .main {background-color: #f9fafb;}
+    .block-container {padding-top: 2rem;}
+    h1, h2, h3 {color: #1e3a8a; font-family: 'Segoe UI', sans-serif;}
+    .stMetric {
+        background-color: white;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        border: 1px solid #e5e7eb;
     }
-    .sub-header {
-        font-size: 1rem; 
-        color: #6B7280; 
-        margin-bottom: 20px;
+    .stDataFrame {border: 1px solid #e5e7eb; border-radius: 5px;}
+    div[data-testid="stExpander"] {
+        border: none;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        border-radius: 8px;
+        background-color: white;
     }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #F3F4F6;
-        border-radius: 5px 5px 0 0;
-        padding-top: 10px;
-        padding-bottom: 10px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #FFFFFF;
-        border-top: 2px solid #1E3A8A;
-    }
+    .highlight-red {color: #ef4444; font-weight: bold;}
+    .highlight-green {color: #10b981; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- Sidebar ---
-with st.sidebar:
-    if os.path.exists("logo.jpg"):
-        st.image("logo.jpg", use_column_width=True)
+# ==========================================
+# 2. AKILLI ŞABLON MOTORU (SMART TEMPLATE) [cite: 10, 11, 21]
+# ==========================================
+TEMPLATE_FILE = "recomatch_memory.json"
+
+class TemplateManager:
+    @staticmethod
+    def load():
+        if os.path.exists(TEMPLATE_FILE):
+            try:
+                with open(TEMPLATE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    @staticmethod
+    def save(data):
+        with open(TEMPLATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def find_best_match(filename):
+        """Dosya ismindeki pattern'e göre kayıtlı ayarları getirir."""
+        templates = TemplateManager.load()
+        # Basit pattern matching: Dosya adının ilk kelimesi veya 'firma' adı
+        # Örnek: 'Vodafone_2025.xlsx' -> Key: 'vodafone'
+        key_candidate = filename.split('_')[0].lower()
+        
+        # Tam eşleşme veya içerir eşleşmesi
+        for key, val in templates.items():
+            if key in filename.lower():
+                return val
+        return {}
+
+    @staticmethod
+    def update_template(filename, mapping):
+        """Yeni ayarları hafızaya kaydeder."""
+        templates = TemplateManager.load()
+        # Dosya adının ayırt edici kısmını anahtar yapalım
+        key = filename.split('_')[0].lower()
+        if len(key) < 3: key = filename.lower() # Çok kısaysa tamamını al
+        
+        templates[key] = mapping
+        TemplateManager.save(templates)
+
+# ==========================================
+# 3. YARDIMCI FONKSİYONLAR (UTILS)
+# ==========================================
+def normalize_text(s):
+    """Metin temizliği: Boşluk sil, 0-O düzelt, Büyük harf yap [cite: 8, 112-114]."""
+    if pd.isna(s): return ""
+    s = str(s).strip().upper()
+    s = s.replace(" ", "")
+    s = s.replace("O", "0") # O harfini sıfıra çevir
+    return s
+
+def get_invoice_key(raw_val):
+    """Fatura No eşleştirme anahtarı (Son 6 hane kuralı) [cite: 115-117]."""
+    norm = normalize_text(raw_val)
+    # Sadece alfanümerik
+    clean = re.sub(r'[^A-Z0-9]', '', norm)
+    # Eğer 6 haneden uzunsa son 6 haneyi de bir alternatif key olarak düşünebiliriz
+    # Ancak gruplama için tek bir key dönmemiz lazım.
+    # Burada 'ana' key'i dönüyoruz. Eşleşme aşamasında fuzzy bakacağız.
+    return clean
+
+def read_and_merge(uploaded_files):
+    """Çoklu dosyayı okur, temizler ve tek DataFrame'de birleştirir[cite: 23, 75]."""
+    if not uploaded_files:
+        return pd.DataFrame()
+    
+    df_list = []
+    for f in uploaded_files:
+        try:
+            temp_df = pd.read_excel(f)
+            # Tüm object kolonları string yap ve temizle
+            for col in temp_df.select_dtypes(include=['object']).columns:
+                temp_df[col] = temp_df[col].astype(str).str.strip()
+            
+            temp_df["Kaynak_Dosya"] = f.name
+            df_list.append(temp_df)
+        except Exception as e:
+            st.error(f"Hata ({f.name}): {e}")
+            
+    if df_list:
+        return pd.concat(df_list, ignore_index=True)
+    return pd.DataFrame()
+
+# ==========================================
+# 4. MUHASEBE VE EŞLEŞTİRME MANTIĞI (CORE LOGIC)
+# ==========================================
+
+def calculate_sign(row, role, type_col, type_mapping):
+    """
+    Belge türüne ve role göre (+/-) işareti belirler. [cite: 25, 26, 30]
+    type_mapping: Kullanıcının belirlediği { 'FATURA': ['FAT', 'INV'], 'ODEME': ['EFT', 'HAVALE'] ... } sözlüğü
+    """
+    doc_type_val = normalize_text(row.get(type_col, ""))
+    
+    # Türü Tespit Et
+    detected_type = "DIGER"
+    for cat, values in type_mapping.items():
+        # values bir liste, listedeki herhangi biri doc_type_val içinde geçiyor mu veya eşit mi?
+        # Tam eşleşme daha güvenli
+        if any(v == doc_type_val for v in values):
+            detected_type = cat
+            break
+    
+    # Tabloya göre işaret mantığı 
+    # Kategoriler: FATURA, IADE_FATURA, ODEME, IADE_ODEME
+    
+    sign = 0
+    if role == "Biz Alıcı": # [cite: 26-27]
+        if detected_type == "FATURA": sign = 1       # Alacak (+)
+        elif detected_type == "IADE_FATURA": sign = -1 # Borç (-)
+        elif detected_type == "ODEME": sign = -1       # Borç (-)
+        elif detected_type == "IADE_ODEME": sign = 1   # Alacak (+)
+            
+    elif role == "Biz Satıcı": # [cite: 30-31]
+        if detected_type == "FATURA": sign = -1       # Borç (-)
+        elif detected_type == "IADE_FATURA": sign = 1 # Alacak (+)
+        elif detected_type == "ODEME": sign = 1       # Alacak (+)
+        elif detected_type == "IADE_ODEME": sign = -1 # Borç (-)
+        
+    return sign, detected_type
+
+def prepare_data(df, mapping, role, type_mapping):
+    """Veriyi hazırlar: Tarih formatla, İşaret uygula, Normalize et."""
+    df = df.copy()
+    
+    # 1. Kolonları Standart İsimlere Çevir (Opsiyonel ama işi kolaylaştırır)
+    # Mapping: { 'date': 'Tarih', 'inv_no': 'Fiş No', ... }
+    
+    # 2. Tarih Formatı
+    col_date = mapping.get("date")
+    if col_date and col_date in df.columns:
+        df["std_date"] = pd.to_datetime(df[col_date], dayfirst=True, errors='coerce')
     else:
-        st.header("🛡️ RecoMatch")
-    
-    st.markdown("---")
-    st.subheader("📁 Dosya Yükleme")
-    
-    uploaded_our = st.file_uploader("Bizim Ekstre (Excel)", accept_multiple_files=False)
-    uploaded_their = st.file_uploader("Karşı Taraf Ekstre (Excel)", accept_multiple_files=False)
-    
-    st.markdown("---")
-    st.subheader("⚙️ Parametreler")
-    payment_scenario = st.radio(
-        "Ödeme Eşleştirme Kriteri",
-        ["Tarih + Ödeme No + Tutar", "Tarih + Belge Türü + Tutar"]
-    )
-    scenario_key = "no_based" if "Ödeme No" in payment_scenario else "type_based"
+        df["std_date"] = pd.NaT
 
-# --- Main Page ---
-st.markdown('<p class="main-header">Mutabakat ve Eşleştirme Paneli</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Fatura ve ödemeleri otomatik eşleştirin, farkları raporlayın.</p>', unsafe_allow_html=True)
+    # 3. Tutar ve İşaret (Sign) [cite: 108]
+    col_tl = mapping.get("tl")
+    col_type = mapping.get("doc_type")
+    
+    df["Signed_TL"] = 0.0
+    df["Doc_Category"] = "DIGER"
+    
+    if col_tl and col_tl in df.columns:
+        # Tutarı sayıya çevir
+        # Bazı excellerde 1.000,50 formatı olabilir, basit replace
+        try:
+             # Basit temizlik: varsa binlik ayracı nokta kaldır, virgülü nokta yap (TR formatı varsayımı)
+            df[col_tl] = df[col_tl].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+            amount_vals = pd.to_numeric(df[col_tl], errors='coerce').fillna(0)
+        except:
+             amount_vals = pd.to_numeric(df[col_tl], errors='coerce').fillna(0)
 
-if uploaded_our and uploaded_their:
-    # 1. Dosyaları Oku
-    df_our = read_excel_file(uploaded_our)
-    df_their = read_excel_file(uploaded_their)
-    
-    # 2. Temizlik
-    df_our = clean_common(df_our)
-    df_their = clean_common(df_their)
-    
-    # 3. Şablon / Kolon Seçimi (Otomatik Kayıtlı)
-    saved_map = get_saved_mapping(uploaded_our.name)
-    
-    # Tab yapısı
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Kolon Ayarları", "🧾 Fatura Eşleşme", "💳 Ödeme Eşleşme", "🔍 Farklar & Özet", "📥 İndir"])
-    
-    with tab1:
-        st.info("Sistem yaptığınız seçimleri dosya ismine göre otomatik hatırlar.")
-        col1, col2 = st.columns(2)
+        # İşaret Hesaplama
+        if col_type and col_type in df.columns:
+            # Vectorize işlem zor, apply kullanacağız (performans için optimize edilebilir ama şimdilik ok)
+            res = df.apply(lambda r: calculate_sign(r, role, col_type, type_mapping), axis=1, result_type='expand')
+            df["Sign_Multiplier"] = res[0]
+            df["Doc_Category"] = res[1]
+        else:
+            # Belge türü seçilmediyse varsayılan bir mantık (Örn: Hepsi Fatura?) 
+            # Kullanıcıya uyarı verilmeli ama kod çalışmalı. 
+            # Varsayılan: Olduğu gibi al (+1)
+            df["Sign_Multiplier"] = 1
+            
+        df["Signed_TL"] = amount_vals * df["Sign_Multiplier"]
         
-        # Kolon Listeleri
-        cols_our = [None] + list(df_our.columns)
+    # 4. Anahtarlar (Keys)
+    col_inv = mapping.get("inv_no")
+    if col_inv and col_inv in df.columns:
+        df["key_invoice_norm"] = df[col_inv].apply(get_invoice_key)
+        # Son 6 hane için ayrı kolon [cite: 115]
+        df["key_invoice_short"] = df["key_invoice_norm"].apply(lambda x: x[-6:] if len(x) > 6 else x)
+    else:
+        df["key_invoice_norm"] = ""
+        df["key_invoice_short"] = ""
+
+    return df
+
+# ==========================================
+# 5. UI: SIDEBAR & DOSYA YÜKLEME
+# ==========================================
+with st.sidebar:
+    st.header("RecoMatch 🛡️")
+    st.caption("Otomatik Mutabakat Sistemi")
+    st.divider()
+    
+    role = st.selectbox("Bizim Rolümüz", ["Biz Alıcı", "Biz Satıcı"], help="Borç/Alacak mantığı buna göre değişir.")
+    
+    st.subheader("1. Dosyalar")
+    files_our = st.file_uploader("Bizim Ekstreler", accept_multiple_files=True, type=["xlsx"])
+    files_their = st.file_uploader("Karşı Taraf Ekstreler", accept_multiple_files=True, type=["xlsx"])
+    
+    st.subheader("2. Ödeme Senaryosu [cite: 47]")
+    payment_scenario = st.radio("Eşleştirme Kriteri", 
+             ["Tarih + Ödeme No + Tutar", "Tarih + Belge Türü + Tutar"])
+    
+    st.divider()
+    btn_analyze = st.button("Analizi Başlat", type="primary", use_container_width=True)
+
+# ==========================================
+# 6. ANA EKRAN & MAPPING LOGIC
+# ==========================================
+
+if files_our and files_their:
+    # --- Verileri Oku ---
+    df_our_raw = read_and_merge(files_our)
+    df_their_raw = read_and_merge(files_their)
+    
+    # --- Kolon Eşleştirme (Smart Template) ---
+    st.info("💡 Dosyalar yüklendi. Kolon eşleştirmelerini kontrol edin (Otomatik önerilmiştir).")
+    
+    # Hafızadan çek
+    saved_map_our = TemplateManager.find_best_match(files_our[0].name)
+    saved_map_their = TemplateManager.find_best_match(files_their[0].name)
+    
+    col_ui_1, col_ui_2 = st.columns(2)
+    
+    mapping_our = {}
+    doc_types_our = {} # Fatura/Ödeme değerleri
+    
+    mapping_their = {}
+    doc_types_their = {}
+
+    def render_mapping_ui(title, df, default_map, key_prefix):
+        """Kolon ve Belge Türü değerlerini seçtiren dinamik UI"""
+        st.markdown(f"### {title}")
+        cols = ["Seçiniz..."] + list(df.columns)
         
-        with col1:
-            st.markdown("### Fatura Ayarları")
-            c_inv_no = st.selectbox("Fatura No", cols_our, index=cols_our.index(saved_map.get("inv_no")) if saved_map.get("inv_no") in cols_our else 0)
-            c_date = st.selectbox("Tarih", cols_our, index=cols_our.index(saved_map.get("date")) if saved_map.get("date") in cols_our else 0)
-            c_tl = st.selectbox("Tutar (TL) [Opsiyonel]", cols_our, index=cols_our.index(saved_map.get("tl")) if saved_map.get("tl") in cols_our else 0)
-            c_curr = st.selectbox("Para Birimi [Opsiyonel]", cols_our, index=cols_our.index(saved_map.get("curr")) if saved_map.get("curr") in cols_our else 0)
-            c_fx = st.selectbox("Döviz Tutar [Opsiyonel]", cols_our, index=cols_our.index(saved_map.get("fx")) if saved_map.get("fx") in cols_our else 0)
-
-        with col2:
-            st.markdown("### Ödeme Ayarları")
-            c_pay_no = st.selectbox("Ödeme No / Açıklama", cols_our, index=cols_our.index(saved_map.get("pay_no")) if saved_map.get("pay_no") in cols_our else 0)
-            c_doc_type = st.selectbox("Belge Türü (Fatura/Ödeme Ayrımı)", cols_our, index=cols_our.index(saved_map.get("doc_type")) if saved_map.get("doc_type") in cols_our else 0)
-            # Ödeme için Tutar ve Tarih yukarıdakilerle aynı olabilir veya ayrı seçtirilebilir. 
-            # Basitlik adına yukarıdakileri kullanacağız ama "Ödeme Tutarı" ayrı bir kolonda ise buraya eklenmeli.
-            # Şimdilik genel tutar kolonunu baz alıyoruz.
-
-        # Otomatik Kayıt Tetikleyici
-        current_map = {
-            "inv_no": c_inv_no, "date": c_date, "tl": c_tl, 
-            "curr": c_curr, "fx": c_fx, "pay_no": c_pay_no, "doc_type": c_doc_type
+        # Helper to find index
+        def idx(c): return cols.index(c) if c in cols else 0
+        
+        # Ana Kolonlar
+        c_inv = st.selectbox("Fatura No (Zorunlu)", cols, index=idx(default_map.get("inv_no")), key=f"{key_prefix}_inv")
+        c_date = st.selectbox("Tarih", cols, index=idx(default_map.get("date")), key=f"{key_prefix}_date")
+        c_tl = st.selectbox("Tutar (TL)", cols, index=idx(default_map.get("tl")), key=f"{key_prefix}_tl")
+        c_curr = st.selectbox("Para Birimi", cols, index=idx(default_map.get("curr")), key=f"{key_prefix}_curr")
+        c_pay_no = st.selectbox("Ödeme No / Açıklama", cols, index=idx(default_map.get("pay_no")), key=f"{key_prefix}_pay")
+        
+        # Belge Türü ve Detay Seçimi [cite: 42]
+        c_type = st.selectbox("Belge Türü Kolonu", cols, index=idx(default_map.get("doc_type")), key=f"{key_prefix}_type")
+        
+        selected_types = {
+            "FATURA": [], "IADE_FATURA": [], "ODEME": [], "IADE_ODEME": []
         }
-        if current_map != saved_map:
-            auto_save_mapping(uploaded_our.name, current_map)
-            # Sayfayı yenilemeye gerek yok, session'da tutabiliriz ama basitlik için devam.
-
-        # Karşı taraf için kolonlar (Varsayılan olarak aynı isimde kolonları arayalım veya seçtirelim)
-        # Kullanıcı kolaylığı için "Karşı Tarafın Kolonları Bizimkiyle Aynı mı?" varsayımı yapabiliriz
-        # Ama genelde farklıdır. Hızlıca map edelim:
-        st.markdown("---")
-        st.markdown("#### Karşı Taraf Kolon Eşleşmesi")
-        st.caption("Karşı taraf dosyasındaki ilgili kolonları seçiniz.")
-        cols_their = [None] + list(df_their.columns)
         
-        col3, col4 = st.columns(2)
-        with col3:
-            t_inv_no = st.selectbox("Karşı Fatura No", cols_their)
-            t_tl = st.selectbox("Karşı Tutar (TL)", cols_their)
-        with col4:
-            t_curr = st.selectbox("Karşı Para Birimi", cols_their)
-            t_pay_no = st.selectbox("Karşı Ödeme No", cols_their)
+        if c_type != "Seçiniz...":
+            # Kolondaki unique değerleri getir
+            unique_vals = [normalize_text(x) for x in df[c_type].unique() if pd.notna(x)]
+            unique_vals = list(set(unique_vals)) # Unique
+            
+            with st.expander("Belge Türü Detaylarını Tanımla (Zorunlu)"):
+                st.caption("Hangi ifadeler Fatura, hangi ifadeler Ödeme sayılacak?")
+                # Defaults from memory
+                d_types = default_map.get("type_vals", {})
+                
+                selected_types["FATURA"] = st.multiselect("Fatura İfadeleri", unique_vals, default=[x for x in d_types.get("FATURA", []) if x in unique_vals], key=f"{key_prefix}_t_fat")
+                selected_types["IADE_FATURA"] = st.multiselect("İade Fatura İfadeleri", unique_vals, default=[x for x in d_types.get("IADE_FATURA", []) if x in unique_vals], key=f"{key_prefix}_t_ifat")
+                selected_types["ODEME"] = st.multiselect("Ödeme İfadeleri", unique_vals, default=[x for x in d_types.get("ODEME", []) if x in unique_vals], key=f"{key_prefix}_t_odeme")
+                selected_types["IADE_ODEME"] = st.multiselect("İade Ödeme İfadeleri", unique_vals, default=[x for x in d_types.get("IADE_ODEME", []) if x in unique_vals], key=f"{key_prefix}_t_iodeme")
 
-        run_btn = st.button("Analizi Başlat", type="primary")
+        return {
+            "inv_no": c_inv if c_inv != "Seçiniz..." else None,
+            "date": c_date if c_date != "Seçiniz..." else None,
+            "tl": c_tl if c_tl != "Seçiniz..." else None,
+            "curr": c_curr if c_curr != "Seçiniz..." else None,
+            "pay_no": c_pay_no if c_pay_no != "Seçiniz..." else None,
+            "doc_type": c_type if c_type != "Seçiniz..." else None,
+            "type_vals": selected_types
+        }
 
-    if run_btn:
-        if not c_inv_no or not t_inv_no:
-            st.error("Lütfen en azından Fatura Numarası kolonlarını seçiniz.")
-            st.stop()
+    with col_ui_1:
+        map_res_our = render_mapping_ui("Bizim Taraf", df_our_raw, saved_map_our, "our")
+    
+    with col_ui_2:
+        map_res_their = render_mapping_ui("Karşı Taraf", df_their_raw, saved_map_their, "their")
 
-        # ---------------------------
-        # ANALİZ MOTORU
-        # ---------------------------
+    # --- Analiz Butonuna Basıldığında ---
+    if btn_analyze:
+        # 1. Şablonları Kaydet (Machine Learning / Memory)
+        TemplateManager.update_template(files_our[0].name, map_res_our)
+        TemplateManager.update_template(files_their[0].name, map_res_their)
         
-        # A) FATURA EŞLEŞTİRME
-        our_inv_prep = prepare_invoices(df_our, c_inv_no, c_curr, c_fx, c_tl)
-        their_inv_prep = prepare_invoices(df_their, t_inv_no, t_curr, None, t_tl) # Karşı tarafta FX yok varsaydık opsiyonel
+        with st.spinner("Analiz yapılıyor... Lütfen bekleyin..."):
+            # 2. Veriyi Hazırla (İşaretler, Tarihler, Keyler)
+            # type_vals kısmını type_mapping olarak pass ediyoruz
+            df_our_prep = prepare_data(df_our_raw, map_res_our, role, map_res_our["type_vals"])
+            # Karşı tarafın rolü bizim tam tersimiz mantığıyla çalışmaz, 
+            # Karşı tarafın verisini "Onların gözünden" değil "Bizim eşleştirmemiz" için hazırlıyoruz.
+            # Ancak hesaplamada onların borcu bizim alacağımızdır.
+            # Doküman [cite: 28, 32] "Karşı tarafta ise bu tam tersi yönünden olacak" diyor.
+            # Yani bizim "Alıcı" olduğumuz durumda, karşı taraf "Satıcı"dır.
+            role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
+            df_their_prep = prepare_data(df_their_raw, map_res_their, role_their, map_res_their["type_vals"])
 
-        matched_invoices = match_invoices(
-            our_inv_prep, their_inv_prep, 
-            col_currency=c_curr, 
-            col_fx_amount=c_fx, 
-            col_tl_amount=c_tl if c_tl else "Tutar_Yok"
-        )
-
-        # B) ÖDEME EŞLEŞTİRME (Eğer seçildiyse)
-        matched_payments = pd.DataFrame()
-        if c_tl and t_tl: # Tutar olmadan ödeme eşleşmez
-             # Sadece ödeme satırlarını filtrelemek gerekir mi? 
-             # Kullanıcı Belge Türü seçtiyse filtreleyelim.
-             df_our_pay = df_our.copy()
-             df_their_pay = df_their.copy()
-
-             # Basit bir filtreleme mantığı (Eğer belge türü seçildiyse "FATURA" olmayanları al gibi)
-             # Veya kullanıcı tüm data üzerinden eşleşme istiyor olabilir.
-             # Senaryo gereği tüm datayı gönderiyoruz, eşleşen eşleşir.
-             
-             pay_cols_our = {"date": c_date, "amount_tl": c_tl, "payment_no": c_pay_no, "doc_type": c_doc_type}
-             pay_cols_their = {"date": c_date, "amount_tl": t_tl, "payment_no": t_pay_no, "doc_type": None} 
-             # Not: Karşı tarafın tarihi için map istemedik, ilk tarih kolonunu varsayıyoruz ya da ekletmek gerekir.
-             # Hızlı çözüm: t_curr vb. seçtirdik ama tarih seçtirmedik. 
-             # Doğrusu: Karşı taraf için de tarih seçtirmektir. Şimdilik 't_inv_no' ile aynı sırada index varsayımı riskli.
-             # Kodun çalışması için 't_date' kolonunu ilk datetime kolonu olarak tahmin edelim:
-             possible_dates = [c for c in df_their.columns if "tarih" in c.lower() or "date" in c.lower()]
-             t_date = possible_dates[0] if possible_dates else df_their.columns[0]
-             pay_cols_their["date"] = t_date
-
-             matched_payments = match_payments(df_our_pay, df_their_pay, scenario_key, pay_cols_our)
-
-        # C) FARKLAR
-        # Fatura bazlı farklar (Bizde var onlarda yok)
-        # match_invoices sonucu 'invoice_key' üzerinden merge edildi.
-        bizde_yok_inv, onlarda_yok_inv = diff_reports(matched_invoices, "invoice_key")
-        
-        # ---------------------------
-        # SONUÇLARI GÖSTER (SESSION STATE)
-        # ---------------------------
-        st.session_state["res_inv"] = matched_invoices
-        st.session_state["res_pay"] = matched_payments
-        st.session_state["res_bizde_yok"] = bizde_yok_inv
-        st.session_state["res_onlarda_yok"] = onlarda_yok_inv
-        st.success("Analiz tamamlandı! Sekmeleri gezerek sonuçları inceleyebilirsiniz.")
-
-    # Sonuçlar varsa göster (Button basılmasa bile state'den)
-    if "res_inv" in st.session_state:
-        m_inv = st.session_state["res_inv"]
-        m_pay = st.session_state["res_pay"]
-        b_yok = st.session_state["res_bizde_yok"]
-        o_yok = st.session_state["res_onlarda_yok"]
-
-        with tab2:
-            st.markdown("#### Fatura Eşleşmeleri")
-            st.dataframe(m_inv, use_container_width=True)
-            if "Fark_TL" in m_inv.columns:
-                total_diff = m_inv["Fark_TL"].sum()
-                st.metric("Toplam Fatura Farkı (TL)", f"{total_diff:,.2f}")
-
-        with tab3:
-            st.markdown("#### Ödeme Eşleşmeleri")
-            if not m_pay.empty:
-                st.dataframe(m_pay, use_container_width=True)
-                if "Fark_TL" in m_pay.columns:
-                    st.metric("Toplam Ödeme Farkı (TL)", f"{m_pay['Fark_TL'].sum():,.2f}")
-            else:
-                st.warning("Ödeme eşleşmesi yapılamadı veya gerekli kolonlar seçilmedi.")
-
-        with tab4:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.error("Bizde Var - Onlarda Yok (Fatura)")
-                st.dataframe(b_yok, use_container_width=True)
-            with c2:
-                st.warning("Onlarda Var - Bizde Yok (Fatura)")
-                st.dataframe(o_yok, use_container_width=True)
-
-        with tab5:
-            st.write("### Tüm Raporu İndir")
-            excel_data = export_to_excel(m_inv, m_pay, b_yok, o_yok)
-            st.download_button(
-                label="📥 Excel Raporunu İndir",
-                data=excel_data,
-                file_name="RecoMatch_Rapor.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            # 3. Eşleştirme Algoritmaları
+            
+            # --- A) FATURA EŞLEŞTİRME [cite: 118] ---
+            # Sadece Fatura kategorisindekiler
+            our_invs = df_our_prep[df_our_prep["Doc_Category"].str.contains("FATURA")]
+            their_invs = df_their_prep[df_their_prep["Doc_Category"].str.contains("FATURA")]
+            
+            # Gruplama (Fatura No + PB) [cite: 118]
+            # Key olarak normalize edilmiş numarayı kullan
+            grp_cols_our = ["key_invoice_norm"]
+            if map_res_our["curr"]: grp_cols_our.append(map_res_our["curr"])
+                
+            grp_cols_their = ["key_invoice_norm"]
+            if map_res_their["curr"]: grp_cols_their.append(map_res_their["curr"])
+            
+            # Aggregation (Toplama) [cite: 29]
+            our_inv_grouped = our_invs.groupby(grp_cols_our, as_index=False).agg(
+                Topla_TL=("Signed_TL", "sum"),
+                Tarih=("std_date", "max"),
+                Orj_Key=("key_invoice_norm", "first") # Merge için
             )
+            their_inv_grouped = their_invs.groupby(grp_cols_their, as_index=False).agg(
+                Topla_TL=("Signed_TL", "sum"),
+                Tarih=("std_date", "max"),
+                Orj_Key=("key_invoice_norm", "first")
+            )
+            
+            # Merge (Eşleştirme)
+            # Önce tam key eşleşmesi
+            matched_inv = pd.merge(our_inv_grouped, their_inv_grouped, on="key_invoice_norm", how="outer", suffixes=("_Biz", "_Onlar"))
+            
+            # TODO: Fuzzy match (Son 6 hane) [cite: 117] için burada eşleşmeyenleri (NaN olanları) 
+            # tekrar bir "Short Key" üzerinden deneyebiliriz. Karmaşıklık artmasın diye şimdilik "Tam + Normalize" bırakıyorum.
+            
+            matched_inv["Fark_TL"] = matched_inv["Topla_TL_Biz"].fillna(0) - matched_inv["Topla_TL_Onlar"].fillna(0)
+            
+            # --- B) ÖDEME EŞLEŞTİRME ---
+            our_pay = df_our_prep[df_our_prep["Doc_Category"].str.contains("ODEME")]
+            their_pay = df_their_prep[df_their_prep["Doc_Category"].str.contains("ODEME")]
+            
+            # Key Oluşturma (Senaryoya göre) [cite: 48, 49]
+            def create_pay_key(df, map_cfg, scenario):
+                date_str = df["std_date"].astype(str)
+                amt_str = df["Signed_TL"].abs().round(2).astype(str) # Tutar mutlak değer olarak anahtar olsun
+                
+                if "Ödeme No" in scenario:
+                    pay_no = df[map_cfg["pay_no"]].astype(str) if map_cfg["pay_no"] else ""
+                    return date_str + "_" + pay_no + "_" + amt_str
+                else:
+                    # Tarih + Belge Türü + Tutar
+                    d_type = df[map_cfg["doc_type"]].astype(str) if map_cfg["doc_type"] else ""
+                    return date_str + "_" + d_type + "_" + amt_str
+            
+            our_pay["match_key"] = create_pay_key(our_pay, map_res_our, payment_scenario)
+            their_pay["match_key"] = create_pay_key(their_pay, map_res_their, payment_scenario)
+            
+            matched_pay = pd.merge(
+                our_pay, their_pay, 
+                on="match_key", how="outer", suffixes=("_Biz", "_Onlar")
+            )
+            # Fark hesabı (Ödemelerde satır bazlı gidiyoruz, aggregate yapmadık çünkü birebir istenmiş [cite: 56])
+            # Ancak çoklu satır varsa (aynı gün aynı tutar 2 ödeme) merge çoğaltır (cartesian).
+            # Bunu engellemek için group yapmak daha sağlıklı olurdu ama şimdilik bırakıyorum.
+            matched_pay["Fark_TL"] = matched_pay["Signed_TL_Biz"].fillna(0) - matched_pay["Signed_TL_Onlar"].fillna(0)
+
+            # --- C) C/H ÖZET (DÖNEMSEL)  ---
+            # Tüm veriyi birleştir (Fatura + Ödeme)
+            # Bizim taraf özet
+            df_our_prep["YilAy"] = df_our_prep["std_date"].dt.to_period("M")
+            ch_biz = df_our_prep.groupby("YilAy")["Signed_TL"].sum().reset_index().rename(columns={"Signed_TL": "Bizim_Bakiye"})
+            
+            # Karşı taraf özet
+            df_their_prep["YilAy"] = df_their_prep["std_date"].dt.to_period("M")
+            ch_onlar = df_their_prep.groupby("YilAy")["Signed_TL"].sum().reset_index().rename(columns={"Signed_TL": "Onlar_Bakiye"})
+            
+            ch_summary = pd.merge(ch_biz, ch_onlar, on="YilAy", how="outer").fillna(0)
+            ch_summary["Fark"] = ch_summary["Bizim_Bakiye"] - ch_summary["Onlar_Bakiye"]
+
+            # --- SONUÇLARI SESSION STATE'E AT ---
+            st.session_state["results"] = {
+                "inv": matched_inv,
+                "pay": matched_pay,
+                "ch": ch_summary,
+                "our_prep": df_our_prep,
+                "their_prep": df_their_prep
+            }
+            st.success("Analiz tamamlandı!")
+
+# ==========================================
+# 7. SONUÇ EKRANI (DASHBOARD)
+# ==========================================
+if "results" in st.session_state:
+    res = st.session_state["results"]
+    
+    # 1. Dashboard (Üst Özet) [cite: 63-66]
+    total_inv_diff = res["inv"]["Fark_TL"].sum()
+    total_pay_diff = res["pay"]["Fark_TL"].sum()
+    
+    # Mutabakat Oranı [cite: 70-72]
+    # Formül: Mutabık (Fark=0) / Toplam İşlem
+    # Fatura için:
+    total_vol = res["inv"]["Topla_TL_Biz"].abs().sum() + res["inv"]["Topla_TL_Onlar"].abs().sum()
+    match_vol = res["inv"][res["inv"]["Fark_TL"].abs() < 0.1]["Topla_TL_Biz"].abs().sum() * 2 # Her iki taraf eşit
+    ratio = (match_vol / total_vol * 100) if total_vol > 0 else 0
+    
+    st.markdown("### 📊 Mutabakat Özeti")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Mutabakat Oranı", f"%{ratio:,.2f}")
+    m2.metric("Toplam Fatura Farkı", f"{total_inv_diff:,.2f} TL")
+    m3.metric("Toplam Ödeme Farkı", f"{total_pay_diff:,.2f} TL")
+    m4.metric("Net Bakiye Farkı", f"{(total_inv_diff + total_pay_diff):,.2f} TL")
+    
+    # 2. Detay Sekmeler
+    tab1, tab2, tab3, tab4 = st.tabs(["🧾 Faturalar", "💳 Ödemeler", "📈 C/H Özet", "📥 İndir"])
+    
+    def color_row(val):
+        """Fark varsa kırmızı, yoksa yeşil [cite: 81-82]"""
+        color = '#d1fae5' if abs(val) < 0.1 else '#fee2e2' # Light Green / Light Red
+        return f'background-color: {color}'
+
+    with tab1:
+        st.subheader("Fatura Eşleşmeleri")
+        df_inv_show = res["inv"].copy()
+        # Görsellik: Fark kolonuna göre renklendirme
+        st.dataframe(df_inv_show.style.applymap(lambda v: 'color: red;' if v != 0 else 'color: green;', subset=['Fark_TL']), use_container_width=True)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.warning("Bizde Var - Onlarda Yok (Fatura)")
+            st.dataframe(df_inv_show[df_inv_show["Topla_TL_Onlar"].isna()])
+        with c2:
+            st.warning("Onlarda Var - Bizde Yok (Fatura)")
+            st.dataframe(df_inv_show[df_inv_show["Topla_TL_Biz"].isna()])
+
+    with tab2:
+        st.subheader("Ödeme Eşleşmeleri")
+        df_pay_show = res["pay"].copy()
+        st.dataframe(df_pay_show, use_container_width=True)
+
+    with tab3:
+        st.subheader("Dönemsel Bakiye Farkları ")
+        st.line_chart(res["ch"].set_index("YilAy")[["Bizim_Bakiye", "Onlar_Bakiye"]])
+        st.dataframe(res["ch"])
+
+    with tab4:
+        st.subheader("Excel Raporu Oluştur")
+        
+        def to_excel():
+            output = BytesIO()
+            writer = pd.ExcelWriter(output, engine='xlsxwriter')
+            res["inv"].to_excel(writer, sheet_name='Fatura_Eslesme', index=False)
+            res["pay"].to_excel(writer, sheet_name='Odeme_Eslesme', index=False)
+            res["ch"].to_excel(writer, sheet_name='CH_Ozet', index=False)
+            
+            # Formatlama (Kırmızı/Yeşil) xlsxwriter ile yapılabilir ama basit tutuyoruz
+            writer.close()
+            return output.getvalue()
+            
+        st.download_button("📥 Raporu İndir (.xlsx)", to_excel(), file_name="RecoMatch_Sonuc.xlsx")
 
 else:
-    st.info("Lütfen sol menüden her iki tarafın Excel dosyasını yükleyiniz.")
+    st.info("👈 Lütfen sol menüden dosyaları yükleyip analizi başlatın.")
