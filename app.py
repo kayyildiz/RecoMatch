@@ -15,9 +15,8 @@ st.markdown("""
 <style>
     .main {background-color: #f8f9fa;}
     .stDataFrame {border: 1px solid #dee2e6; border-radius: 4px;}
-    div[data-testid="stExpander"] {border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.1); background: white;}
+    div[data-testid="stExpander"] {background: white; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);}
     
-    /* ÖZET TABLO CSS */
     .mini-table {
         width: 100%; border-collapse: collapse; font-size: 0.85rem; 
         background: white; border-radius: 8px; overflow: hidden; 
@@ -33,7 +32,6 @@ st.markdown("""
         color: #374151; font-family: 'Segoe UI Mono', monospace;
     }
     .mini-table td:first-child { text-align: left; font-family: sans-serif; font-weight: 600; color: #111827; }
-    
     .pos-val { color: #059669; font-weight: 700; }
     .neg-val { color: #dc2626; font-weight: 700; }
     .neu-val { color: #9ca3af; }
@@ -293,7 +291,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 6. GÖRÜNTÜ FORMATLAYICI (EKSİKSİZ KOLONLAR)
+# 6. GÖRÜNTÜ FORMATLAYICI (EKSİKSİZ VERİ)
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
@@ -303,34 +301,57 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     if "Kaynak_Dosya_Biz" in df.columns: cols_our.append("Kaynak_Dosya_Biz"); rename_our["Kaynak_Dosya_Biz"] = "Kaynak (Biz)"
     if "Satır_No_Biz" in df.columns: cols_our.append("Satır_No_Biz"); rename_our["Satır_No_Biz"] = "Satır (Biz)"
     
-    # Anahtar Kolon (Fatura/Ödeme)
-    key_col_our = map_our.get("inv_no") if type == "FATURA" else map_our.get("pay_no")
-    key_label_our = "Fatura No (Biz)" if type == "FATURA" else "Ödeme No (Biz)"
-    
-    if key_col_our and (key_col_our + "_Biz") in df.columns:
-        cols_our.append(key_col_our + "_Biz")
-        rename_our[key_col_our + "_Biz"] = key_label_our
-            
+    # 1. Anahtar Kolon (Fatura/Ödeme No)
+    # FATURA NO İÇİN: inv_no kolonunu al
+    if type == "FATURA":
+        orig_inv = map_our.get("inv_no")
+        if orig_inv and (orig_inv + "_Biz") in df.columns:
+            cols_our.append(orig_inv + "_Biz")
+            rename_our[orig_inv + "_Biz"] = "Fatura No (Biz)"
+    # ÖDEME İÇİN: Ödeme sekmesinde de Fatura No görünmeli, ama asıl anahtar ödeme no
+    else:
+        orig_pay = map_our.get("pay_no")
+        if orig_pay and (orig_pay + "_Biz") in df.columns:
+            cols_our.append(orig_pay + "_Biz")
+            rename_our[orig_pay + "_Biz"] = "Ödeme/Açıklama (Biz)"
+        # Ödemelerde de Fatura No görmek istiyorsanız:
+        orig_inv = map_our.get("inv_no")
+        if orig_inv and (orig_inv + "_Biz") in df.columns:
+            cols_our.append(orig_inv + "_Biz")
+            rename_our[orig_inv + "_Biz"] = "İlgili Fatura (Biz)"
+
+    # 2. Tarih ve Tutarlar
     cols_our.extend(["std_date_Biz", "Signed_TL_Biz", "Signed_FX_Biz"])
     rename_our.update({"std_date_Biz": "Tarih (Biz)", "Signed_TL_Biz": "Tutar TL (Biz)", "Signed_FX_Biz": "Tutar FX (Biz)"})
     
     if map_our.get("curr") and (map_our.get("curr")+"_Biz" in df.columns):
         cols_our.append(map_our.get("curr")+"_Biz"); rename_our[map_our.get("curr")+"_Biz"] = "PB (Biz)"
         
+    # 3. İlave Kolonlar (Dinamik Ekleme)
     for ec in map_our.get("extra_cols", []):
-        if (ec+"_Biz") in df.columns: cols_our.append(ec+"_Biz"); rename_our[ec+"_Biz"] = f"{ec} (Biz)"
+        if (ec+"_Biz") in df.columns:
+            cols_our.append(ec+"_Biz")
+            rename_our[ec+"_Biz"] = f"{ec} (Biz)"
 
-    # Karşı Taraf
+    # --- Karşı Taraf ---
     cols_their, rename_their = [], {}
     if "Kaynak_Dosya_Onlar" in df.columns: cols_their.append("Kaynak_Dosya_Onlar"); rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
     if "Satır_No_Onlar" in df.columns: cols_their.append("Satır_No_Onlar"); rename_their["Satır_No_Onlar"] = "Satır (Onlar)"
 
-    key_col_their = map_their.get("inv_no") if type == "FATURA" else map_their.get("pay_no")
-    key_label_their = "Fatura No (Onlar)" if type == "FATURA" else "Ödeme No (Onlar)"
-
-    if key_col_their and (key_col_their + "_Onlar") in df.columns:
-        cols_their.append(key_col_their + "_Onlar")
-        rename_their[key_col_their + "_Onlar"] = key_label_their
+    if type == "FATURA":
+        orig_inv = map_their.get("inv_no")
+        if orig_inv and (orig_inv + "_Onlar") in df.columns:
+            cols_their.append(orig_inv + "_Onlar")
+            rename_their[orig_inv + "_Onlar"] = "Fatura No (Onlar)"
+    else:
+        orig_pay = map_their.get("pay_no")
+        if orig_pay and (orig_pay + "_Onlar") in df.columns:
+            cols_their.append(orig_pay + "_Onlar")
+            rename_their[orig_pay + "_Onlar"] = "Ödeme/Açıklama (Onlar)"
+        orig_inv = map_their.get("inv_no")
+        if orig_inv and (orig_inv + "_Onlar") in df.columns:
+            cols_their.append(orig_inv + "_Onlar")
+            rename_their[orig_inv + "_Onlar"] = "İlgili Fatura (Onlar)"
             
     cols_their.extend(["std_date_Onlar", "Signed_TL_Onlar", "Signed_FX_Onlar"])
     rename_their.update({"std_date_Onlar": "Tarih (Onlar)", "Signed_TL_Onlar": "Tutar TL (Onlar)", "Signed_FX_Onlar": "Tutar FX (Onlar)"})
@@ -339,7 +360,9 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         cols_their.append(map_their.get("curr")+"_Onlar"); rename_their[map_their.get("curr")+"_Onlar"] = "PB (Onlar)"
 
     for ec in map_their.get("extra_cols", []):
-        if (ec+"_Onlar") in df.columns: cols_their.append(ec+"_Onlar"); rename_their[ec+"_Onlar"] = f"{ec} (Onlar)"
+        if (ec+"_Onlar") in df.columns:
+            cols_their.append(ec+"_Onlar")
+            rename_their[ec+"_Onlar"] = f"{ec} (Onlar)"
 
     final_cols = cols_our + cols_their + ["Fark_TL", "Fark_FX"]
     final_rename = {**rename_our, **rename_their, "Fark_TL": "Fark (TL)", "Fark_FX": "Fark (FX)"}
@@ -386,20 +409,20 @@ if files_our and files_their:
             ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
             ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
 
-            # --- EŞLEŞTİRME (AGGREGATION DÜZELTİLDİ) ---
+            # --- EŞLEŞTİRME ---
             inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
             inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
             
+            # GÜÇLENDİRİLMİŞ GROUP BY (TÜM KOLONLARI KORU)
             def build_agg(mapping):
-                # 1. Temel kolonlar
                 agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
-                # 2. Anahtar Fatura No
+                # Fatura No ve Ödeme No'yu koru
                 if mapping.get("inv_no"): agg[mapping["inv_no"]] = "first"
-                # 3. Para Birimi
-                if mapping.get("curr"): agg[mapping["curr"]] = "first"
-                # 4. İLAVE KOLONLAR (BURASI KRİTİK)
-                for ec in mapping.get("extra_cols", []): 
-                    agg[ec] = "first"
+                if mapping.get("pay_no"): agg[mapping["pay_no"]] = "first"
+                # Para birimi koru
+                if mapping.get("curr"): agg[mapping["curr"]] = "first" 
+                # İlave kolonları koru
+                for ec in mapping.get("extra_cols", []): agg[ec] = "first"
                 return agg
 
             gk_our = ["key_invoice_norm"] + ([map_our["curr"]] if map_our["curr"] else [])
