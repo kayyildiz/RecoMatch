@@ -7,35 +7,47 @@ import re
 from io import BytesIO
 
 # ==========================================
-# 1. AYARLAR & CSS
+# 1. AYARLAR & CSS (MINIMAL & TEMİZ)
 # ==========================================
 st.set_page_config(page_title="RecoMatch", layout="wide", page_icon="🛡️")
 
 st.markdown("""
 <style>
     .main {background-color: #f8f9fa;}
-    .stDataFrame {border: 1px solid #dee2e6; border-radius: 4px;}
     div[data-testid="stExpander"] {border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.1); background: white;}
     
-    /* ÖZET TABLO STİLİ */
-    .mini-table {
-        width: 100%; border-collapse: collapse; font-size: 0.9rem; 
-        background: white; border-radius: 8px; overflow: hidden; 
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 1rem;
+    /* MİNİMAL TABLO (HTML SORUNSUZ) */
+    .summary-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 0.9rem;
+        background-color: white;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        margin-bottom: 20px;
     }
-    .mini-table th {
-        background: #1e3a8a; color: white; text-align: right; 
-        padding: 10px 15px; font-weight: 600;
+    .summary-table thead tr {
+        background-color: #1e3a8a;
+        color: #ffffff;
+        text-align: right;
     }
-    .mini-table th:first-child { text-align: left; }
-    .mini-table td {
-        padding: 8px 15px; text-align: right; border-bottom: 1px solid #f3f4f6;
-        color: #374151; font-family: 'Segoe UI Mono', monospace;
+    .summary-table th, .summary-table td {
+        padding: 10px 15px;
+        border-bottom: 1px solid #dddddd;
     }
-    .mini-table td:first-child { text-align: left; font-family: sans-serif; font-weight: 600; color: #111827; }
-    .pos-val { color: #059669; font-weight: bold; }
-    .neg-val { color: #dc2626; font-weight: bold; }
-    .neu-val { color: #9ca3af; }
+    .summary-table th:first-child, .summary-table td:first-child {
+        text-align: left;
+        font-weight: bold;
+        color: #1f2937;
+    }
+    .summary-table tbody tr:last-of-type {
+        border-bottom: 2px solid #1e3a8a;
+    }
+    .val-pos { color: #059669; font-weight: 700; }
+    .val-neg { color: #dc2626; font-weight: 700; }
+    .val-neu { color: #9ca3af; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,7 +82,7 @@ class TemplateManager:
         return {}
 
 # ==========================================
-# 3. PARSER (TÜRKÇE FORMAT UYUMLU)
+# 3. PARSER VE OKUMA
 # ==========================================
 def normalize_text(s):
     if pd.isna(s): return ""
@@ -83,27 +95,22 @@ def get_invoice_key(raw_val):
     return clean
 
 def parse_amount(val):
-    """
-    1.234,56 veya 1234,56 formatlarını float'a çevirir.
-    """
+    """Güvenli Sayı Dönüştürücü"""
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     
     s = str(val).strip()
-    # Harf ve sembol temizliği
-    s = re.sub(r"[^\d.,-]", "", s)
+    s = re.sub(r"[^\d.,-]", "", s) # Sadece sayısal karakterleri bırak
     if not s or s == "-": return 0.0
     
     try:
-        # TR Format: Nokta binlik, Virgül ondalık
         if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."): 
+            if s.rfind(",") > s.rfind("."): # TR: 1.234,56
                 s = s.replace(".", "").replace(",", ".")
-            else: 
+            else: # US: 1,234.56
                 s = s.replace(",", "")
         elif "," in s: 
-            s = s.replace(",", ".")
-            
+            s = s.replace(",", ".") # TR ondalık: 12,50
         return float(s)
     except:
         return 0.0
@@ -113,139 +120,124 @@ def read_and_merge(uploaded_files):
     df_list = []
     for f in uploaded_files:
         try:
-            # Header=0 (İlk satır başlık)
+            # Header her zaman 0. satır
             temp_df = pd.read_excel(f, header=0)
-            temp_df["Satır_No"] = temp_df.index + 2 
+            temp_df["Satır_No"] = temp_df.index + 2
             temp_df.columns = temp_df.columns.astype(str)
-            
             for col in temp_df.select_dtypes(include=['object']).columns:
                 temp_df[col] = temp_df[col].astype(str).str.strip()
-            
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
         except Exception as e:
-            st.error(f"Dosya okuma hatası ({f.name}): {e}")
+            st.error(f"Hata ({f.name}): {e}")
     return pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
 
 # ==========================================
-# 4. HESAPLAMA MANTIĞI (AKILLI YÖN TESPİTİ)
+# 4. HESAPLAMA MANTIĞI (SİZİN SENARYONUZ)
 # ==========================================
-
-def calculate_smart_balance(row, role, 
-                            mode_tl, c_tl_debt, c_tl_credit, c_tl_single,
-                            mode_fx, c_fx_debt, c_fx_credit, c_fx_single,
-                            doc_cat):
+def calculate_row_data(row, role, 
+                       mode_tl, c_tl_d, c_tl_c, c_tl_s, 
+                       mode_fx, c_fx_d, c_fx_c, c_fx_s, 
+                       doc_cat):
     
-    # --- 1. TL HESABI ---
-    tl_debt_val = 0.0
-    tl_credit_val = 0.0
-    tl_net = 0.0
-    tl_sign_derived = 0 # FX için kullanılacak işaret
-    
-    # İşaret Mantığı (Tek Kolon İçin)
-    # Biz Alıcıysak: Fatura (+), Ödeme (-)
-    # Biz Satıcıysak: Fatura (-), Ödeme (+)
-    sign_single = 1
+    # 1. Varsayılan Yön (Tek kolonlar için)
+    # Alıcı: Fatura(+), Ödeme(-)
+    # Satıcı: Fatura(-), Ödeme(+)
+    sign = 1
     if role == "Biz Alıcı":
-        if doc_cat in ["FATURA", "IADE_ODEME"]: sign_single = 1 
-        else: sign_single = -1 
+        if doc_cat in ["FATURA", "IADE_ODEME"]: sign = 1
+        else: sign = -1
     else: # Biz Satıcı
-        if doc_cat in ["FATURA", "IADE_ODEME"]: sign_single = -1 
-        else: sign_single = 1 
+        if doc_cat in ["FATURA", "IADE_ODEME"]: sign = -1
+        else: sign = 1
 
+    # 2. TL Hesapla
+    tl_val = 0.0
+    tl_debt = 0.0
+    tl_credit = 0.0
+    
     if mode_tl == "separate":
-        tl_debt_val = parse_amount(row.get(c_tl_debt, 0))
-        tl_credit_val = parse_amount(row.get(c_tl_credit, 0))
-        # Standart Muhasebe: Alacak - Borç
-        tl_net = tl_credit_val - tl_debt_val
-        
-        # FX için yön tespiti:
-        if tl_credit_val > 0 and tl_debt_val == 0: tl_sign_derived = 1
-        elif tl_debt_val > 0 and tl_credit_val == 0: tl_sign_derived = -1
-        else: tl_sign_derived = sign_single # Fallback
-        
+        tl_debt = parse_amount(row.get(c_tl_d, 0))
+        tl_credit = parse_amount(row.get(c_tl_c, 0))
+        tl_val = tl_credit - tl_debt
     else:
-        # Tek kolon TL
-        raw_tl = parse_amount(row.get(c_tl_single, 0))
-        tl_net = raw_tl * sign_single
-        tl_sign_derived = sign_single
+        raw_tl = parse_amount(row.get(c_tl_s, 0))
+        tl_val = raw_tl * sign
 
-    # --- 2. FX HESABI ---
-    fx_net = 0.0
+    # 3. FX Hesapla
+    fx_val = 0.0
     
     if mode_fx == "separate":
-        # Döviz de Ayrı Kolon
-        f_d = parse_amount(row.get(c_fx_debt, 0))
-        f_c = parse_amount(row.get(c_fx_credit, 0))
-        fx_net = f_c - f_d
-        
+        fx_d = parse_amount(row.get(c_fx_d, 0))
+        fx_c = parse_amount(row.get(c_fx_c, 0))
+        fx_val = fx_c - fx_d
     elif mode_fx == "single":
-        # Döviz Tek Kolon (KRİTİK: Yön Tespiti)
-        raw_fx = parse_amount(row.get(c_fx_single, 0))
-        
+        raw_fx = parse_amount(row.get(c_fx_s, 0))
         if raw_fx != 0:
+            # Sizin Senaryo: TL Ayrı, FX Tek Kolon
             if mode_tl == "separate":
-                # TL ayrık ise, TL'nin yönüne göre FX'i işaretle
-                # Eğer TL Alacak > 0 ise FX de Alacaktır (+)
-                # Eğer TL Borç > 0 ise FX de Borçtur (-)
-                if tl_credit_val > tl_debt_val: fx_net = abs(raw_fx)
-                elif tl_debt_val > tl_credit_val: fx_net = -abs(raw_fx)
-                else: 
-                    # TL 0 veya eşitse belge türüne dön
-                    fx_net = raw_fx * sign_single
+                # TL Alacak bakiyesi veriyorsa FX de Pozitif
+                if tl_credit > 0 and tl_debt == 0: fx_val = abs(raw_fx)
+                # TL Borç bakiyesi veriyorsa FX de Negatif
+                elif tl_debt > 0 and tl_credit == 0: fx_val = -abs(raw_fx)
+                else: fx_val = raw_fx * sign # Karışık ise belge türüne dön
             else:
-                # TL de tek kolonsa belge türüne göre
-                fx_net = raw_fx * sign_single
+                fx_val = raw_fx * sign
 
-    return tl_net, fx_net
+    return tl_val, fx_val
 
-def get_doc_category(row_type_val, type_config):
-    val = normalize_text(row_type_val)
-    if val in [normalize_text(x) for x in type_config.get("FATURA", [])]: return "FATURA"
-    elif val in [normalize_text(x) for x in type_config.get("ODEME", [])]: return "ODEME"
-    elif val in [normalize_text(x) for x in type_config.get("IADE_FATURA", [])]: return "IADE_FATURA"
-    elif val in [normalize_text(x) for x in type_config.get("IADE_ODEME", [])]: return "IADE_ODEME"
+def get_doc_category(val, cfg):
+    val = normalize_text(val)
+    if val in [normalize_text(x) for x in cfg.get("FATURA", [])]: return "FATURA"
+    elif val in [normalize_text(x) for x in cfg.get("ODEME", [])]: return "ODEME"
+    elif val in [normalize_text(x) for x in cfg.get("IADE_FATURA", [])]: return "IADE_FATURA"
+    elif val in [normalize_text(x) for x in cfg.get("IADE_ODEME", [])]: return "IADE_ODEME"
     return "DIGER"
 
 def prepare_data(df, mapping, role):
-    if df.empty: return df
     df = df.copy()
     
+    # Tarih
     c_date = mapping.get("date")
     if c_date and c_date in df.columns:
         df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce').dt.date
     else: df["std_date"] = None
 
+    # Kategori
     c_type = mapping.get("doc_type")
     type_cfg = mapping.get("type_vals", {})
     if c_type and c_type in df.columns:
         df["Doc_Category"] = df[c_type].apply(lambda x: get_doc_category(x, type_cfg))
     else: df["Doc_Category"] = "DIGER"
 
-    def calc_row(row):
-        return calculate_smart_balance(
-            row, role,
+    # Hesapla
+    def wrapper(r):
+        return calculate_row_data(
+            r, role,
             mapping.get("amount_mode", "single"), 
             mapping.get("col_debt"), mapping.get("col_credit"), mapping.get("col_amount"),
             mapping.get("fx_amount_mode", "none"),
             mapping.get("col_fx_debt"), mapping.get("col_fx_credit"), mapping.get("col_fx_amount"),
-            row["Doc_Category"]
+            r["Doc_Category"]
         )
+    
+    res = df.apply(wrapper, axis=1, result_type='expand')
+    df["Signed_TL"] = res[0]
+    df["Signed_FX"] = res[1]
 
-    res_df = df.apply(calc_row, axis=1, result_type='expand')
-    df["Signed_TL"] = res_df[0]
-    df["Signed_FX"] = res_df[1]
-
+    # PB
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
         df["PB_Norm"] = df[c_curr].apply(normalize_text)
         df["PB_Norm"] = df["PB_Norm"].replace("", "TL").fillna("TL")
     else: df["PB_Norm"] = "TL"
 
+    # Key
     c_inv = mapping.get("inv_no")
     if c_inv and c_inv in df.columns:
         df["key_invoice_norm"] = df[c_inv].apply(get_invoice_key)
     else: df["key_invoice_norm"] = ""
+    
     return df
 
 # ==========================================
@@ -259,60 +251,60 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     st.caption("Yerel (TL) Tutar")
     amount_mode = st.radio(f"{title} TL Mod", ["Tek Kolon", "Ayrı (Borç/Alacak)"], 
                            index=0 if default_map.get("amount_mode") != "separate" else 1, horizontal=True, key=f"{key_prefix}_mode")
-    mode_val = "single" if amount_mode == "Tek Kolon" else "separate"
+    mode_tl = "single" if amount_mode == "Tek Kolon" else "separate"
     
-    c_debt, c_credit, c_amt = None, None, None
-    if mode_val == "separate":
+    c_tl_d, c_tl_c, c_tl_s = None, None, None
+    if mode_tl == "separate":
         c1, c2 = st.columns(2)
-        with c1: c_debt = st.selectbox("TL Borç", cols, index=idx(default_map.get("col_debt")), key=f"{key_prefix}_debt")
-        with c2: c_credit = st.selectbox("TL Alacak", cols, index=idx(default_map.get("col_credit")), key=f"{key_prefix}_credit")
-    else: c_amt = st.selectbox("TL Tutar", cols, index=idx(default_map.get("col_amount")), key=f"{key_prefix}_amt")
+        with c1: c_tl_d = st.selectbox("TL Borç", cols, index=idx(default_map.get("col_debt")), key=f"{key_prefix}_debt")
+        with c2: c_tl_c = st.selectbox("TL Alacak", cols, index=idx(default_map.get("col_credit")), key=f"{key_prefix}_credit")
+    else: c_tl_s = st.selectbox("TL Tutar", cols, index=idx(default_map.get("col_amount")), key=f"{key_prefix}_amt")
 
     st.caption("Döviz (FX) Tutar")
-    fx_option = st.radio(f"{title} Döviz Mod", ["Yok", "Tek Kolon", "Ayrı (Borç/Alacak)"],
-                         index=0 if default_map.get("fx_amount_mode", "none") == "none" else (1 if default_map.get("fx_amount_mode") == "single" else 2),
-                         horizontal=True, key=f"{key_prefix}_fx_opt")
-    fx_mode_val = "none"
-    c_fx_debt, c_fx_credit, c_fx_amt = None, None, None
-    if fx_option == "Tek Kolon":
-        fx_mode_val = "single"
-        c_fx_amt = st.selectbox("Döviz Tutar", cols, index=idx(default_map.get("col_fx_amount")), key=f"{key_prefix}_fx_amt")
-    elif fx_option == "Ayrı (Borç/Alacak)":
-        fx_mode_val = "separate"
+    fx_opt = st.radio(f"{title} Döviz Mod", ["Yok", "Tek Kolon", "Ayrı (Borç/Alacak)"],
+                      index=0 if default_map.get("fx_amount_mode", "none") == "none" else (1 if default_map.get("fx_amount_mode") == "single" else 2),
+                      horizontal=True, key=f"{key_prefix}_fx_opt")
+    mode_fx = "none"
+    c_fx_d, c_fx_c, c_fx_s = None, None, None
+    if fx_opt == "Tek Kolon":
+        mode_fx = "single"
+        c_fx_s = st.selectbox("Döviz Tutar", cols, index=idx(default_map.get("col_fx_amount")), key=f"{key_prefix}_fx_amt")
+    elif fx_opt == "Ayrı (Borç/Alacak)":
+        mode_fx = "separate"
         f1, f2 = st.columns(2)
-        with f1: c_fx_debt = st.selectbox("Döviz Borç", cols, index=idx(default_map.get("col_fx_debt")), key=f"{key_prefix}_fx_debt")
-        with f2: c_fx_credit = st.selectbox("Döviz Alacak", cols, index=idx(default_map.get("col_fx_credit")), key=f"{key_prefix}_fx_credit")
+        with f1: c_fx_d = st.selectbox("Döviz Borç", cols, index=idx(default_map.get("col_fx_debt")), key=f"{key_prefix}_fx_debt")
+        with f2: c_fx_c = st.selectbox("Döviz Alacak", cols, index=idx(default_map.get("col_fx_credit")), key=f"{key_prefix}_fx_credit")
 
     st.divider()
     c1, c2, c3 = st.columns(3)
     with c1: c_inv = st.selectbox("Fatura No", cols, index=idx(default_map.get("inv_no")), key=f"{key_prefix}_inv")
     with c2: c_date = st.selectbox("Tarih", cols, index=idx(default_map.get("date")), key=f"{key_prefix}_date")
     with c3: c_curr = st.selectbox("Para Birimi", cols, index=idx(default_map.get("curr")), key=f"{key_prefix}_curr")
-    c_pay_no = st.selectbox("Ödeme No / Açıklama", cols, index=idx(default_map.get("pay_no")), key=f"{key_prefix}_pay")
+    c_pay = st.selectbox("Ödeme No / Açıklama", cols, index=idx(default_map.get("pay_no")), key=f"{key_prefix}_pay")
 
     st.markdown("---")
     c_type = st.selectbox("Belge Türü", cols, index=idx(default_map.get("doc_type")), key=f"{key_prefix}_type")
-    selected_types = {"FATURA": [], "IADE_FATURA": [], "ODEME": [], "IADE_ODEME": []}
+    sel_types = {"FATURA": [], "IADE_FATURA": [], "ODEME": [], "IADE_ODEME": []}
     if c_type != "Seçiniz...":
-        unique_vals = sorted([str(x) for x in df[c_type].unique() if pd.notna(x)])
-        d_types = default_map.get("type_vals", {})
-        with st.expander(f"📂 {title} - Tür Eşleştirme", expanded=False):
+        vals = sorted([str(x) for x in df[c_type].unique() if pd.notna(x)])
+        d_t = default_map.get("type_vals", {})
+        with st.expander(f"📂 {title} - Belge Türü Eşleştirme", expanded=False):
             c_f, c_o = st.columns(2)
             with c_f:
-                selected_types["FATURA"] = st.multiselect("Faturalar", unique_vals, default=d_types.get("FATURA", []), key=f"{key_prefix}_mf")
-                selected_types["IADE_FATURA"] = st.multiselect("İade Faturalar", unique_vals, default=d_types.get("IADE_FATURA", []), key=f"{key_prefix}_mif")
+                sel_types["FATURA"] = st.multiselect("Faturalar", vals, default=d_t.get("FATURA", []), key=f"{key_prefix}_mf")
+                sel_types["IADE_FATURA"] = st.multiselect("İade Faturalar", vals, default=d_t.get("IADE_FATURA", []), key=f"{key_prefix}_mif")
             with c_o:
-                selected_types["ODEME"] = st.multiselect("Ödemeler", unique_vals, default=d_types.get("ODEME", []), key=f"{key_prefix}_mo")
-                selected_types["IADE_ODEME"] = st.multiselect("İade Ödemeler", unique_vals, default=d_types.get("IADE_ODEME", []), key=f"{key_prefix}_mio")
+                sel_types["ODEME"] = st.multiselect("Ödemeler", vals, default=d_t.get("ODEME", []), key=f"{key_prefix}_mo")
+                sel_types["IADE_ODEME"] = st.multiselect("İade Ödemeler", vals, default=d_t.get("IADE_ODEME", []), key=f"{key_prefix}_mio")
 
-    extra_cols = st.multiselect("İlave Kolonlar", [c for c in cols if c != "Seçiniz..."], default=default_map.get("extra_cols", []), key=f"{key_prefix}_extra")
+    extra = st.multiselect("İlave Kolonlar", [c for c in cols if c != "Seçiniz..."], default=default_map.get("extra_cols", []), key=f"{key_prefix}_extra")
 
-    def clean(v): return None if v == "Seçiniz..." else v
+    def cln(v): return None if v == "Seçiniz..." else v
     return {
-        "amount_mode": mode_val, "col_debt": clean(c_debt), "col_credit": clean(c_credit), "col_amount": clean(c_amt),
-        "fx_amount_mode": fx_mode_val, "col_fx_debt": clean(c_fx_debt), "col_fx_credit": clean(c_fx_credit), "col_fx_amount": clean(c_fx_amt),
-        "inv_no": clean(c_inv), "date": clean(c_date), "curr": clean(c_curr),
-        "pay_no": clean(c_pay_no), "doc_type": clean(c_type), "type_vals": selected_types, "extra_cols": extra_cols
+        "amount_mode": mode_tl, "col_debt": cln(c_tl_d), "col_credit": cln(c_tl_c), "col_amount": cln(c_tl_s),
+        "fx_amount_mode": mode_fx, "col_fx_debt": cln(c_fx_d), "col_fx_credit": cln(c_fx_c), "col_fx_amount": cln(c_fx_s),
+        "inv_no": cln(c_inv), "date": cln(c_date), "curr": cln(c_curr),
+        "pay_no": cln(c_pay), "doc_type": cln(c_type), "type_vals": sel_types, "extra_cols": extra
     }
 
 # ==========================================
@@ -325,14 +317,13 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     
     if type == "FATURA":
         orig = map_our.get("inv_no")
-        if orig and (orig+"_Biz" in df.columns): cols_our.append(orig+"_Biz"); rename_our[orig+"_Biz"] = "Fatura (Biz)"
+        if orig and (orig+"_Biz" in df.columns): cols_our.append(orig+"_Biz"); rename_our[orig+"_Biz"] = "Fatura No (Biz)"
     else:
         orig = map_our.get("pay_no")
         if orig and (orig+"_Biz" in df.columns): cols_our.append(orig+"_Biz"); rename_our[orig+"_Biz"] = "Ödeme/Açık. (Biz)"
             
-    cols_our.append("std_date_Biz"); rename_our["std_date_Biz"] = "Tarih (Biz)"
-    cols_our.append("Signed_TL_Biz"); rename_our["Signed_TL_Biz"] = "Tutar TL (Biz)"
-    cols_our.append("Signed_FX_Biz"); rename_our["Signed_FX_Biz"] = "Tutar FX (Biz)"
+    cols_our.extend(["std_date_Biz", "Signed_TL_Biz", "Signed_FX_Biz"])
+    rename_our.update({"std_date_Biz": "Tarih (Biz)", "Signed_TL_Biz": "Tutar TL (Biz)", "Signed_FX_Biz": "Tutar FX (Biz)"})
     
     if map_our.get("curr") and (map_our.get("curr")+"_Biz" in df.columns):
         cols_our.append(map_our.get("curr")+"_Biz"); rename_our[map_our.get("curr")+"_Biz"] = "PB (Biz)"
@@ -345,14 +336,13 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
 
     if type == "FATURA":
         orig = map_their.get("inv_no")
-        if orig and (orig+"_Onlar" in df.columns): cols_their.append(orig+"_Onlar"); rename_their[orig+"_Onlar"] = "Fatura (Onlar)"
+        if orig and (orig+"_Onlar" in df.columns): cols_their.append(orig+"_Onlar"); rename_their[orig+"_Onlar"] = "Fatura No (Onlar)"
     else:
         orig = map_their.get("pay_no")
         if orig and (orig+"_Onlar" in df.columns): cols_their.append(orig+"_Onlar"); rename_their[orig+"_Onlar"] = "Ödeme/Açık. (Onlar)"
             
-    cols_their.append("std_date_Onlar"); rename_their["std_date_Onlar"] = "Tarih (Onlar)"
-    cols_their.append("Signed_TL_Onlar"); rename_their["Signed_TL_Onlar"] = "Tutar TL (Onlar)"
-    cols_their.append("Signed_FX_Onlar"); rename_their["Signed_FX_Onlar"] = "Tutar FX (Onlar)"
+    cols_their.extend(["std_date_Onlar", "Signed_TL_Onlar", "Signed_FX_Onlar"])
+    rename_their.update({"std_date_Onlar": "Tarih (Onlar)", "Signed_TL_Onlar": "Tutar TL (Onlar)", "Signed_FX_Onlar": "Tutar FX (Onlar)"})
 
     if map_their.get("curr") and (map_their.get("curr")+"_Onlar" in df.columns):
         cols_their.append(map_their.get("curr")+"_Onlar"); rename_their[map_their.get("curr")+"_Onlar"] = "PB (Onlar)"
@@ -397,7 +387,7 @@ if files_our and files_their:
         TemplateManager.update_template(files_our[0].name, map_our)
         TemplateManager.update_template(files_their[0].name, map_their)
         
-        with st.spinner("Hesaplanıyor..."):
+        with st.spinner("Analiz yapılıyor..."):
             prep_our = prepare_data(df_our, map_our, role)
             role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
             prep_their = prepare_data(df_their, map_their, role_their)
@@ -410,10 +400,7 @@ if files_our and files_their:
             inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
             
             def build_agg(mapping):
-                agg = {
-                    "Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max",
-                    "Kaynak_Dosya": "first", "Satır_No": "first"
-                }
+                agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
                 if mapping.get("inv_no"): agg[mapping["inv_no"]] = "first"
                 if mapping.get("curr"): agg[mapping["curr"]] = "first" 
                 for ec in mapping.get("extra_cols", []): agg[ec] = "first"
@@ -452,7 +439,7 @@ if files_our and files_their:
             merged_pay["Fark_TL"] = merged_pay["Signed_TL_Biz"].fillna(0) + merged_pay["Signed_TL_Onlar"].fillna(0)
             merged_pay["Fark_FX"] = merged_pay["Signed_FX_Biz"].fillna(0) + merged_pay["Signed_FX_Onlar"].fillna(0)
 
-            # --- BAKİYE ÖZET ---
+            # --- BAKİYE ---
             our_bal = prep_our.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
             their_bal = prep_their.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
             balance_summary = pd.merge(our_bal, their_bal, on="PB_Norm", how="outer", suffixes=("_Biz", "_Onlar")).fillna(0)
@@ -469,38 +456,25 @@ if files_our and files_their:
 
 if "res" in st.session_state:
     res = st.session_state["res"]
-    
     st.markdown("### 📊 Mutabakat Özeti")
     
     summary_df = res["balance_summary"]
-    # HTML TABLO SATIRLARI (String birleştirme ile)
-    rows_html = ""
-    for _, row in summary_df.iterrows():
-        pb = row["PB_Norm"]
-        c_fx = "pos-val" if row['Net_Fark_FX'] >= 0 else "neg-val"
-        c_tl = "pos-val" if row['Net_Fark_TL'] >= 0 else "neg-val"
-        
-        rows_html += f"""
-            <tr>
-                <td>{pb}</td>
-                <td>{row['Signed_FX_Biz']:,.2f}</td>
-                <td>{row['Signed_FX_Onlar']:,.2f}</td>
-                <td class="{c_fx}">{row['Net_Fark_FX']:,.2f}</td>
-                <td class="{c_tl}">{row['Net_Fark_TL']:,.2f} TL</td>
-            </tr>
-        """
+    rows = ""
+    for _, r in summary_df.iterrows():
+        c_fx = "val-pos" if r['Net_Fark_FX'] >= 0 else "val-neg"
+        c_tl = "val-pos" if r['Net_Fark_TL'] >= 0 else "val-neg"
+        rows += f"""<tr>
+            <td>{r['PB_Norm']}</td>
+            <td>{r['Signed_FX_Biz']:,.2f}</td><td>{r['Signed_FX_Onlar']:,.2f}</td>
+            <td class="{c_fx}">{r['Net_Fark_FX']:,.2f}</td><td class="{c_tl}">{r['Net_Fark_TL']:,.2f}</td>
+        </tr>"""
 
-    full_table = f"""
-    <table class="mini-table">
-        <thead>
-            <tr>
-                <th>PB</th> <th>Bizim Bakiye</th> <th>Karşı Bakiye</th> <th>Fark (Döviz)</th> <th>Fark (TL Karşılığı)</th>
-            </tr>
-        </thead>
-        <tbody>{rows_html}</tbody>
+    st.markdown(f"""
+    <table class="summary-table">
+        <thead><tr><th>PB</th><th>Bizim Bakiye</th><th>Karşı Bakiye</th><th>Fark (Döviz)</th><th>Fark (TL)</th></tr></thead>
+        <tbody>{rows}</tbody>
     </table>
-    """
-    st.markdown(full_table, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✅ Fatura Eşleşme", "⚠️ Bizde Var/Yok", "⚠️ Onlarda Var/Yok", "💳 Ödemeler", "🔍 Analiz Dışı", "📥 İndir"])
     with tab1: st.data_editor(res["inv_match"], use_container_width=True, disabled=True)
