@@ -17,25 +17,30 @@ st.markdown("""
     .stDataFrame {border: 1px solid #dee2e6; border-radius: 4px;}
     div[data-testid="stExpander"] {border: none; box-shadow: 0 1px 2px rgba(0,0,0,0.1); background: white;}
     
-    /* ÖZET TABLO CSS */
+    /* ÖZET TABLO CSS (Sütunlar arttığı için fontu bir tık küçülttük) */
     .mini-table {
-        width: 100%; border-collapse: collapse; font-size: 0.9rem; 
+        width: 100%; border-collapse: collapse; font-size: 0.85rem; 
         background: white; border-radius: 8px; overflow: hidden; 
         box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 1rem;
     }
     .mini-table th {
         background: #1e3a8a; color: white; text-align: right; 
-        padding: 10px 15px; font-weight: 600;
+        padding: 10px 8px; font-weight: 600; white-space: nowrap;
     }
     .mini-table th:first-child { text-align: left; }
     .mini-table td {
-        padding: 8px 15px; text-align: right; border-bottom: 1px solid #f3f4f6;
+        padding: 8px 8px; text-align: right; border-bottom: 1px solid #f3f4f6;
         color: #374151; font-family: 'Segoe UI Mono', monospace;
     }
     .mini-table td:first-child { text-align: left; font-family: sans-serif; font-weight: 600; color: #111827; }
-    .pos-val { color: #059669; font-weight: bold; }
-    .neg-val { color: #dc2626; font-weight: bold; }
+    
+    /* Renk Sınıfları */
+    .pos-val { color: #059669; font-weight: 700; }
+    .neg-val { color: #dc2626; font-weight: 700; }
     .neu-val { color: #9ca3af; }
+    
+    /* Ayrım Çizgisi (TL ve Döviz arasını ayırmak için) */
+    .border-left-thick { border-left: 2px solid #e5e7eb; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,25 +93,18 @@ def parse_amount(val):
     if isinstance(val, (int, float)): return float(val)
     
     s = str(val).strip()
-    # Eksi işareti en başta olabilir, onu koru
     is_negative = s.startswith("-")
-    s = re.sub(r"[^\d.,]", "", s) # Sadece sayı ve nokta virgül bırak
+    s = re.sub(r"[^\d.,]", "", s)
     if not s: return 0.0
     
     try:
-        # 1.234,56 (TR) -> Noktayı sil, virgülü nokta yap
         if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."): 
-                s = s.replace(".", "").replace(",", ".")
-            else: # 1,234.56 (US)
-                s = s.replace(",", "")
-        elif "," in s: 
-            s = s.replace(",", ".")
-            
+            if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
+            else: s = s.replace(",", "")
+        elif "," in s: s = s.replace(",", ".")
         val_float = float(s)
         return -val_float if is_negative else val_float
-    except:
-        return 0.0
+    except: return 0.0
 
 def read_and_merge(uploaded_files):
     if not uploaded_files: return pd.DataFrame()
@@ -125,16 +123,13 @@ def read_and_merge(uploaded_files):
     return pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
 
 # ==========================================
-# 4. HESAPLAMA MANTIĞI (YENİ: SIGNED OVERRIDE)
+# 4. HESAPLAMA MANTIĞI
 # ==========================================
-
 def calculate_smart_balance(row, role, 
                             mode_tl, c_tl_debt, c_tl_credit, c_tl_single, is_tl_signed,
                             mode_fx, c_fx_debt, c_fx_credit, c_fx_single, is_fx_signed,
                             doc_cat):
     
-    # 1. Varsayılan İşaret (Belge Türüne Göre)
-    # Eğer "is_signed" True ise BU KULLANILMAZ (Value olduğu gibi alınır)
     calc_sign = 1
     if role == "Biz Alıcı":
         if doc_cat in ["FATURA", "IADE_ODEME"]: calc_sign = 1 
@@ -153,36 +148,27 @@ def calculate_smart_balance(row, role,
         tl_credit_val = parse_amount(row.get(c_tl_credit, 0))
         tl_net = tl_credit_val - tl_debt_val
     else:
-        # Tek kolon
         raw_tl = parse_amount(row.get(c_tl_single, 0))
-        # YENİ MANTIK: Eğer zaten işaretliyse (is_tl_signed), dokunma!
-        if is_tl_signed:
-            tl_net = raw_tl
-        else:
-            tl_net = raw_tl * calc_sign
+        if is_tl_signed: tl_net = raw_tl
+        else: tl_net = raw_tl * calc_sign
 
     # --- FX HESABI ---
     fx_net = 0.0
-    
     if mode_fx == "separate":
         f_d = parse_amount(row.get(c_fx_debt, 0))
         f_c = parse_amount(row.get(c_fx_credit, 0))
         fx_net = f_c - f_d
-        
     elif mode_fx == "single":
         raw_fx = parse_amount(row.get(c_fx_single, 0))
         if raw_fx != 0:
             if is_fx_signed:
-                # Zaten işaretli (+/-)
                 fx_net = raw_fx
             else:
-                # Yönü TL'den al (Akıllı Tespit) veya hesapla
                 if mode_tl == "separate":
                     if tl_debt_val > 0: fx_net = -abs(raw_fx)
                     elif tl_credit_val > 0: fx_net = abs(raw_fx)
                     else: fx_net = raw_fx * calc_sign
                 elif mode_tl == "single" and is_tl_signed:
-                    # TL işaretli tek kolonsa, onun işaretini kullan
                     if tl_net < 0: fx_net = -abs(raw_fx)
                     elif tl_net > 0: fx_net = abs(raw_fx)
                     else: fx_net = raw_fx * calc_sign
@@ -200,9 +186,7 @@ def get_doc_category(val, cfg):
     return "DIGER"
 
 def prepare_data(df, mapping, role):
-    if df.empty: return df
     df = df.copy()
-    
     c_date = mapping.get("date")
     if c_date and c_date in df.columns:
         df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce').dt.date
@@ -214,19 +198,19 @@ def prepare_data(df, mapping, role):
         df["Doc_Category"] = df[c_type].apply(lambda x: get_doc_category(x, type_cfg))
     else: df["Doc_Category"] = "DIGER"
 
-    def calc_row(row):
+    def wrapper(r):
         return calculate_smart_balance(
-            row, role,
+            r, role,
             mapping.get("amount_mode", "single"), 
             mapping.get("col_debt"), mapping.get("col_credit"), mapping.get("col_amount"), mapping.get("is_tl_signed"),
             mapping.get("fx_amount_mode", "none"),
             mapping.get("col_fx_debt"), mapping.get("col_fx_credit"), mapping.get("col_fx_amount"), mapping.get("is_fx_signed"),
-            row["Doc_Category"]
+            r["Doc_Category"]
         )
-
-    res_df = df.apply(calc_row, axis=1, result_type='expand')
-    df["Signed_TL"] = res_df[0]
-    df["Signed_FX"] = res_df[1]
+    
+    res = df.apply(wrapper, axis=1, result_type='expand')
+    df["Signed_TL"] = res[0]
+    df["Signed_FX"] = res[1]
 
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
@@ -241,7 +225,7 @@ def prepare_data(df, mapping, role):
     return df
 
 # ==========================================
-# 5. UI & MAPPING (YENİ ONAY KUTULARI)
+# 5. UI & MAPPING
 # ==========================================
 def render_mapping_ui(title, df, default_map, key_prefix):
     st.markdown(f"#### {title} Ayarları")
@@ -260,7 +244,6 @@ def render_mapping_ui(title, df, default_map, key_prefix):
         with c2: c_tl_c = st.selectbox("TL Alacak", cols, index=idx(default_map.get("col_credit")), key=f"{key_prefix}_credit")
     else:
         c_tl_s = st.selectbox("TL Tutar", cols, index=idx(default_map.get("col_amount")), key=f"{key_prefix}_amt")
-        # YENİ: Zaten işaretli mi?
         is_tl_sign = st.checkbox("Tutarlar Excel'de zaten (+/-) işaretli", 
                                  value=default_map.get("is_tl_signed", False), key=f"{key_prefix}_tlsign")
 
@@ -328,9 +311,8 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         orig = map_our.get("pay_no")
         if orig and (orig+"_Biz" in df.columns): cols_our.append(orig+"_Biz"); rename_our[orig+"_Biz"] = "Ödeme/Açık. (Biz)"
             
-    cols_our.append("std_date_Biz"); rename_our["std_date_Biz"] = "Tarih (Biz)"
-    cols_our.append("Signed_TL_Biz"); rename_our["Signed_TL_Biz"] = "Tutar TL (Biz)"
-    cols_our.append("Signed_FX_Biz"); rename_our["Signed_FX_Biz"] = "Tutar FX (Biz)"
+    cols_our.extend(["std_date_Biz", "Signed_TL_Biz", "Signed_FX_Biz"])
+    rename_our.update({"std_date_Biz": "Tarih (Biz)", "Signed_TL_Biz": "Tutar TL (Biz)", "Signed_FX_Biz": "Tutar FX (Biz)"})
     
     if map_our.get("curr") and (map_our.get("curr")+"_Biz" in df.columns):
         cols_our.append(map_our.get("curr")+"_Biz"); rename_our[map_our.get("curr")+"_Biz"] = "PB (Biz)"
@@ -348,9 +330,8 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         orig = map_their.get("pay_no")
         if orig and (orig+"_Onlar" in df.columns): cols_their.append(orig+"_Onlar"); rename_their[orig+"_Onlar"] = "Ödeme/Açık. (Onlar)"
             
-    cols_their.append("std_date_Onlar"); rename_their["std_date_Onlar"] = "Tarih (Onlar)"
-    cols_their.append("Signed_TL_Onlar"); rename_their["Signed_TL_Onlar"] = "Tutar TL (Onlar)"
-    cols_their.append("Signed_FX_Onlar"); rename_their["Signed_FX_Onlar"] = "Tutar FX (Onlar)"
+    cols_their.extend(["std_date_Onlar", "Signed_TL_Onlar", "Signed_FX_Onlar"])
+    rename_their.update({"std_date_Onlar": "Tarih (Onlar)", "Signed_TL_Onlar": "Tutar TL (Onlar)", "Signed_FX_Onlar": "Tutar FX (Onlar)"})
 
     if map_their.get("curr") and (map_their.get("curr")+"_Onlar" in df.columns):
         cols_their.append(map_their.get("curr")+"_Onlar"); rename_their[map_their.get("curr")+"_Onlar"] = "PB (Onlar)"
@@ -473,13 +454,18 @@ if "res" in st.session_state:
         c_tl = "pos-val" if r['Net_Fark_TL'] >= 0 else "neg-val"
         rows += f"""<tr>
             <td>{r['PB_Norm']}</td>
-            <td>{r['Signed_FX_Biz']:,.2f}</td><td>{r['Signed_FX_Onlar']:,.2f}</td>
-            <td class="{c_fx}">{r['Net_Fark_FX']:,.2f}</td><td class="{c_tl}">{r['Net_Fark_TL']:,.2f}</td>
+            <td>{r['Signed_TL_Biz']:,.2f}</td><td>{r['Signed_TL_Onlar']:,.2f}</td><td class="{c_tl}">{r['Net_Fark_TL']:,.2f}</td>
+            <td class="border-left-thick">{r['Signed_FX_Biz']:,.2f}</td><td>{r['Signed_FX_Onlar']:,.2f}</td><td class="{c_fx}">{r['Net_Fark_FX']:,.2f}</td>
         </tr>"""
 
     st.markdown(f"""
     <table class="mini-table">
-        <thead><tr><th>PB</th><th>Bizim Bakiye</th><th>Karşı Bakiye</th><th>Fark (Döviz)</th><th>Fark (TL)</th></tr></thead>
+        <thead>
+            <tr>
+                <th>PB</th> <th>Bizim TL</th> <th>Karşı TL</th> <th>Fark TL</th> 
+                <th class="border-left-thick">Bizim Döviz</th> <th>Karşı Döviz</th> <th>Fark Döviz</th>
+            </tr>
+        </thead>
         <tbody>{rows}</tbody>
     </table>
     """, unsafe_allow_html=True)
