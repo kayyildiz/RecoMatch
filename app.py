@@ -72,8 +72,12 @@ def read_and_merge(uploaded_files):
     for f in uploaded_files:
         try:
             temp_df = pd.read_excel(f)
+            # Satır No Ekleme (Excel'de başlık 1. satırsa, veri 2'den başlar)
+            temp_df["Satır_No"] = temp_df.index + 2 
+            
             for col in temp_df.select_dtypes(include=['object']).columns:
                 temp_df[col] = temp_df[col].astype(str).str.strip()
+            
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
         except Exception as e:
@@ -169,7 +173,6 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     cols = ["Seçiniz..."] + list(df.columns)
     def idx(c): return cols.index(c) if c in cols else 0
 
-    # Tutar Modu
     amount_mode = st.radio(f"{title} Tutar Tipi", ["Tek Kolon", "Ayrı (Borç/Alacak)"], 
                            index=0 if default_map.get("amount_mode") != "separate" else 1,
                            horizontal=True, key=f"{key_prefix}_mode")
@@ -183,7 +186,6 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     else:
         c_amt = st.selectbox("Tutar Kolonu", cols, index=idx(default_map.get("col_amount")), key=f"{key_prefix}_amt")
 
-    # Kolonlar
     c1, c2, c3 = st.columns(3)
     with c1: c_inv = st.selectbox("Fatura No", cols, index=idx(default_map.get("inv_no")), key=f"{key_prefix}_inv")
     with c2: c_date = st.selectbox("Tarih", cols, index=idx(default_map.get("date")), key=f"{key_prefix}_date")
@@ -191,7 +193,6 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     
     c_pay_no = st.selectbox("Ödeme No / Açıklama", cols, index=idx(default_map.get("pay_no")), key=f"{key_prefix}_pay")
 
-    # Belge Türü
     st.markdown("---")
     c_type = st.selectbox("Belge Türü Kolonu", cols, index=idx(default_map.get("doc_type")), key=f"{key_prefix}_type")
     selected_types = {"FATURA": [], "IADE_FATURA": [], "ODEME": [], "IADE_ODEME": []}
@@ -211,10 +212,9 @@ def render_mapping_ui(title, df, default_map, key_prefix):
                 selected_types["ODEME"] = st.multiselect("Ödemeler", unique_vals, default=[x for x in d_types.get("ODEME", []) if x in unique_vals], key=f"{key_prefix}_mo")
                 selected_types["IADE_ODEME"] = st.multiselect("İade Ödemeler", unique_vals, default=[x for x in d_types.get("IADE_ODEME", []) if x in unique_vals], key=f"{key_prefix}_mio")
 
-    # İlave Kolonlar
     st.markdown("---")
     extra_cols = st.multiselect(
-        "Rapora Eklenecek İlave Kolonlar (Opsiyonel)", 
+        "Rapora Eklenecek İlave Kolonlar (Açıklama, Proje Kodu vb.)", 
         [c for c in cols if c != "Seçiniz..."],
         default=[x for x in default_map.get("extra_cols", []) if x in cols],
         key=f"{key_prefix}_extra"
@@ -231,7 +231,104 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 5. MAIN FLOW
+# 5. COLUMN FORMATTER (WITH SOURCE & ROW)
+# ==========================================
+def format_clean_view(df, map_our, map_their, type="FATURA"):
+    """
+    Sıralama: [Kaynak] [Satır] [No] [Tarih] [Tutar] | ... | [Fark]
+    """
+    # --- BİZİM TARAF ---
+    cols_our = []
+    rename_our = {}
+    
+    # Kaynak ve Satır (Varsa)
+    if "Kaynak_Dosya_Biz" in df.columns:
+        cols_our.append("Kaynak_Dosya_Biz")
+        rename_our["Kaynak_Dosya_Biz"] = "Kaynak (Biz)"
+    if "Satır_No_Biz" in df.columns:
+        cols_our.append("Satır_No_Biz")
+        rename_our["Satır_No_Biz"] = "Satır (Biz)"
+    
+    # ID
+    if type == "FATURA":
+        orig_col = map_our.get("inv_no")
+        if orig_col and orig_col + "_Biz" in df.columns: 
+            cols_our.append(orig_col + "_Biz")
+            rename_our[orig_col + "_Biz"] = "Belge No (Biz)"
+    else: # ODEME
+        orig_col = map_our.get("pay_no")
+        if orig_col and orig_col + "_Biz" in df.columns:
+            cols_our.append(orig_col + "_Biz")
+            rename_our[orig_col + "_Biz"] = "Açıklama (Biz)"
+            
+    # Temel Veriler
+    cols_our.append("std_date_Biz")
+    rename_our["std_date_Biz"] = "Tarih (Biz)"
+    
+    cols_our.append("Signed_TL_Biz")
+    rename_our["Signed_TL_Biz"] = "Tutar (Biz)"
+    
+    if map_our.get("curr") and map_our.get("curr") + "_Biz" in df.columns:
+        cols_our.append(map_our.get("curr") + "_Biz")
+        rename_our[map_our.get("curr") + "_Biz"] = "PB (Biz)"
+
+    # İlave Kolonlar
+    for ec in map_our.get("extra_cols", []):
+        if ec + "_Biz" in df.columns:
+            cols_our.append(ec + "_Biz")
+            rename_our[ec + "_Biz"] = f"{ec} (Biz)"
+
+    # --- KARŞI TARAF ---
+    cols_their = []
+    rename_their = {}
+    
+    if "Kaynak_Dosya_Onlar" in df.columns:
+        cols_their.append("Kaynak_Dosya_Onlar")
+        rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
+    if "Satır_No_Onlar" in df.columns:
+        cols_their.append("Satır_No_Onlar")
+        rename_their["Satır_No_Onlar"] = "Satır (Onlar)"
+
+    if type == "FATURA":
+        orig_col = map_their.get("inv_no")
+        if orig_col and orig_col + "_Onlar" in df.columns: 
+            cols_their.append(orig_col + "_Onlar")
+            rename_their[orig_col + "_Onlar"] = "Belge No (Onlar)"
+    else:
+        orig_col = map_their.get("pay_no")
+        if orig_col and orig_col + "_Onlar" in df.columns:
+            cols_their.append(orig_col + "_Onlar")
+            rename_their[orig_col + "_Onlar"] = "Açıklama (Onlar)"
+            
+    cols_their.append("std_date_Onlar")
+    rename_their["std_date_Onlar"] = "Tarih (Onlar)"
+    
+    cols_their.append("Signed_TL_Onlar")
+    rename_their["Signed_TL_Onlar"] = "Tutar (Onlar)"
+
+    if map_their.get("curr") and map_their.get("curr") + "_Onlar" in df.columns:
+        cols_their.append(map_their.get("curr") + "_Onlar")
+        rename_their[map_their.get("curr") + "_Onlar"] = "PB (Onlar)"
+
+    for ec in map_their.get("extra_cols", []):
+        if ec + "_Onlar" in df.columns:
+            cols_their.append(ec + "_Onlar")
+            rename_their[ec + "_Onlar"] = f"{ec} (Onlar)"
+
+    # --- BİRLEŞTİRME ---
+    final_cols = cols_our + cols_their + ["Fark_TL"]
+    final_rename = {**rename_our, **rename_their, "Fark_TL": "Fark (TL)"}
+    
+    # Kolonlar mevcutsa seç
+    existing_cols = [c for c in final_cols if c in df.columns]
+    
+    view_df = df[existing_cols].copy()
+    view_df = view_df.rename(columns=final_rename)
+    
+    return view_df
+
+# ==========================================
+# 6. MAIN FLOW
 # ==========================================
 with st.sidebar:
     st.header("RecoMatch 🛡️")
@@ -262,7 +359,7 @@ if files_our and files_their:
             role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
             prep_their = prepare_data(df_their, map_their, role_their)
 
-            # --- DENETİM: KAPSAM DIŞI KALANLAR ---
+            # Audit
             ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
             ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
 
@@ -270,8 +367,16 @@ if files_our and files_their:
             inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
             inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
             
+            # Group By - Kaynak ve Satır Bilgilerini Koru (First)
             def build_agg(mapping):
-                agg = {"Signed_TL": "sum", "std_date": "max", mapping["inv_no"]: "first"}
+                agg = {
+                    "Signed_TL": "sum", 
+                    "std_date": "max", 
+                    mapping["inv_no"]: "first",
+                    "Kaynak_Dosya": "first",
+                    "Satır_No": "first"
+                }
+                if mapping.get("curr"): agg[mapping["curr"]] = "first" 
                 for ec in mapping.get("extra_cols", []): agg[ec] = "first"
                 return agg
 
@@ -299,47 +404,20 @@ if files_our and files_their:
             pay_our["match_key"] = create_pay_key(pay_our, map_our, pay_scenario)
             pay_their["match_key"] = create_pay_key(pay_their, map_their, pay_scenario)
             
+            # Suffix otomatik eklenir (Kaynak_Dosya -> Kaynak_Dosya_Biz)
             merged_pay = pd.merge(pay_our, pay_their, on="match_key", how="outer", suffixes=("_Biz", "_Onlar"))
             merged_pay["Fark_TL"] = merged_pay["Signed_TL_Biz"].fillna(0) + merged_pay["Signed_TL_Onlar"].fillna(0)
 
-            # --- GÖRÜNÜM & FORMATLAMA ---
-            def format_cols(df, map1, map2, is_pay=False):
-                col_map = {
-                    "Signed_TL_Biz": "Tutar (Biz)", "Signed_TL_Onlar": "Tutar (Onlar)",
-                    "std_date_Biz": "Tarih (Biz)", "std_date_Onlar": "Tarih (Onlar)",
-                    "Fark_TL": "Fark (TL)"
-                }
-                
-                if not is_pay:
-                    col_map[map1.get("inv_no") + "_Biz"] = "Belge No (Biz)"
-                    col_map[map2.get("inv_no") + "_Onlar"] = "Belge No (Onlar)"
-                else:
-                    # Ödeme için özel sütunlar
-                    if map1.get("pay_no"): col_map[map1.get("pay_no") + "_Biz"] = "Açıklama/No (Biz)"
-                    if map2.get("pay_no"): col_map[map2.get("pay_no") + "_Onlar"] = "Açıklama/No (Onlar)"
-
-                for ec in map1.get("extra_cols", []): col_map[ec + "_Biz"] = f"{ec} (Biz)"
-                for ec in map2.get("extra_cols", []): col_map[ec + "_Onlar"] = f"{ec} (Onlar)"
-                
-                # Sadece mevcut kolonları rename et
-                avail_cols = [c for c in col_map.keys() if c in df.columns]
-                final_map = {k: v for k, v in col_map.items() if k in avail_cols}
-                
-                # Sadeleştirilmiş tablo döndür
-                base_cols = list(final_map.values())
-                df = df.rename(columns=final_map)
-                
-                # Eğer kolon varsa seçerek döndür, yoksa hepsini
-                try:
-                    return df[base_cols]
-                except:
-                    return df
+            # --- C) RAPOR ---
+            inv_match = merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].notna()]
+            inv_bizde = merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].isna()]
+            inv_onlar = merged_inv[merged_inv["Signed_TL_Biz"].isna() & merged_inv["Signed_TL_Onlar"].notna()]
 
             st.session_state["res"] = {
-                "inv_match": format_cols(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their),
-                "inv_bizde": format_cols(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].isna()], map_our, map_their),
-                "inv_onlar": format_cols(merged_inv[merged_inv["Signed_TL_Biz"].isna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their),
-                "pay_match": format_cols(merged_pay, map_our, map_their, is_pay=True),
+                "inv_match": format_clean_view(inv_match, map_our, map_their, "FATURA"),
+                "inv_bizde": format_clean_view(inv_bizde, map_our, map_their, "FATURA"),
+                "inv_onlar": format_clean_view(inv_onlar, map_our, map_their, "FATURA"),
+                "pay_match": format_clean_view(merged_pay, map_our, map_their, "ODEME"),
                 "ignored_our": ignored_our,
                 "ignored_their": ignored_their
             }
@@ -349,29 +427,24 @@ if "res" in st.session_state:
     
     st.markdown("### 📊 Analiz Sonuçları")
     m1, m2, m3 = st.columns(3)
-    m1.metric("Eşleşen Fatura Farkı", f"{res['inv_match']['Fark (TL)'].sum():,.2f} TL")
-    m2.metric("Bizde Olup Onlarda Olmayan", len(res["inv_bizde"]))
-    m3.metric("Onlarda Olup Bizde Olmayan", len(res["inv_onlar"]))
+    diff_val = res['inv_match']['Fark (TL)'].sum() if not res['inv_match'].empty else 0
+    m1.metric("Eşleşen Fatura Farkı", f"{diff_val:,.2f} TL")
+    m2.metric("Bizde Var / Yok", len(res["inv_bizde"]))
+    m3.metric("Onlarda Var / Yok", len(res["inv_onlar"]))
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "✅ Fatura Eşleşme", "⚠️ Bizde Var / Yok", "⚠️ Onlarda Var / Yok", 
-        "💳 Ödemeler", "🔍 Analiz Dışı (Audit)", "📥 İndir"
+        "💳 Ödemeler", "🔍 Analiz Dışı", "📥 İndir"
     ])
     
     with tab1: st.dataframe(res["inv_match"], use_container_width=True)
     with tab2: st.dataframe(res["inv_bizde"], use_container_width=True)
     with tab3: st.dataframe(res["inv_onlar"], use_container_width=True)
     with tab4: st.dataframe(res["pay_match"], use_container_width=True)
-    
     with tab5:
-        st.info("Aşağıdaki satırlar 'Belge Türü' seçimlerinize uymadığı için (örn: Virman, Açılış) analize dahil edilmemiştir.")
         c1, c2 = st.columns(2)
-        with c1: 
-            st.write("Bizim Taraf (Dahil Edilmeyenler)")
-            st.dataframe(res["ignored_our"])
-        with c2: 
-            st.write("Karşı Taraf (Dahil Edilmeyenler)")
-            st.dataframe(res["ignored_their"])
+        with c1: st.write("Bizim Taraf (Kapsam Dışı)"); st.dataframe(res["ignored_our"])
+        with c2: st.write("Karşı Taraf (Kapsam Dışı)"); st.dataframe(res["ignored_their"])
             
     with tab6:
         output = BytesIO()
@@ -383,4 +456,4 @@ if "res" in st.session_state:
         res["ignored_our"].to_excel(writer, sheet_name='Audit_Biz', index=False)
         res["ignored_their"].to_excel(writer, sheet_name='Audit_Onlar', index=False)
         writer.close()
-        st.download_button("Tüm Raporu İndir", output.getvalue(), "RecoMatch_Rapor.xlsx")
+        st.download_button("Excel Raporunu İndir", output.getvalue(), "RecoMatch_Rapor.xlsx")
