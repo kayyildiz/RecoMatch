@@ -213,7 +213,6 @@ def prepare_data(df, mapping, role):
     if df.empty: return df
     df = df.copy()
     c_date = mapping.get("date")
-    # Date parse with coerce to avoid crash
     if c_date and c_date in df.columns:
         df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce')
     else: df["std_date"] = pd.NaT
@@ -241,8 +240,8 @@ def prepare_data(df, mapping, role):
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
         df["PB_Norm"] = df[c_curr].apply(normalize_currency)
-    else:
-        df["PB_Norm"] = "TL"
+        df["PB_Norm"] = df["PB_Norm"].replace("", "TL").fillna("TL")
+    else: df["PB_Norm"] = "TL"
 
     c_inv = mapping.get("inv_no")
     if c_inv and c_inv in df.columns:
@@ -326,16 +325,16 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 6. GÖRÜNTÜ FORMATLAYICI (ONLAR TARİH DÜZELDİ)
+# 6. GÖRÜNTÜ FORMATLAYICI
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
     
-    # Tarih Formatı (Varsa)
+    # Tarihleri güvenli formatla
     if "std_date_Biz" in df.columns:
-        df["std_date_Biz"] = pd.to_datetime(df["std_date_Biz"]).dt.strftime('%d.%m.%Y')
+        df["std_date_Biz"] = pd.to_datetime(df["std_date_Biz"], errors='coerce').dt.strftime('%d.%m.%Y')
     if "std_date_Onlar" in df.columns:
-        df["std_date_Onlar"] = pd.to_datetime(df["std_date_Onlar"]).dt.strftime('%d.%m.%Y')
+        df["std_date_Onlar"] = pd.to_datetime(df["std_date_Onlar"], errors='coerce').dt.strftime('%d.%m.%Y')
 
     cols_our, rename_our = [], {}
     
@@ -392,10 +391,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     final_rename = {**rename_our, **rename_their, "Fark_TL": "Fark (TL)", "Fark_FX": "Fark (FX)"}
     
     existing = [c for c in final_cols if c in df.columns]
-    out_df = df[existing].rename(columns=final_rename)
-    
-    if out_df.empty: return pd.DataFrame()
-    return out_df
+    return df[existing].rename(columns=final_rename)
 
 # ==========================================
 # 7. MAIN FLOW
@@ -448,7 +444,7 @@ if files_our and files_their:
                 inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
                 inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
                 
-                # AGGREGATION FIXED: Tarihi koru
+                # AGGREGATION
                 def build_agg(mapping):
                     agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
                     if mapping.get("inv_no"): agg[mapping["inv_no"]] = "first"
@@ -470,11 +466,14 @@ if files_our and files_their:
                 merged_inv["Fark_TL"] = merged_inv["Signed_TL_Biz"].fillna(0) - merged_inv["Signed_TL_Onlar"].fillna(0)
                 merged_inv["Fark_FX"] = merged_inv["Signed_FX_Biz"].fillna(0) - merged_inv["Signed_FX_Onlar"].fillna(0)
 
-                # --- ÖDEME ---
+                # --- ÖDEME (GELİŞMİŞ SIRALAMA) ---
                 pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
                 pay_their = prep_their[prep_their["Doc_Category"].str.contains("ODEME")].copy()
                 
-                # PAY KEY FIXED: Hassas string formatı (%.2f)
+                # 1. Önce sırala ki cumcount (sıra no) doğru verilsin
+                pay_our = pay_our.sort_values(by=["std_date", "Signed_TL"])
+                pay_their = pay_their.sort_values(by=["std_date", "Signed_TL"])
+
                 def create_pay_key(df, cfg, scenario):
                     d = df["std_date"].dt.strftime('%Y-%m-%d').astype(str)
                     a = df["Signed_TL"].abs().map('{:.2f}'.format)
@@ -484,6 +483,7 @@ if files_our and files_their:
                     else:
                         cat = df["Doc_Category"].astype(str)
                         base_key = d + "_" + cat + "_" + a
+                    
                     df["_temp_rank"] = df.groupby(base_key).cumcount()
                     return base_key + "_" + df["_temp_rank"].astype(str)
 
@@ -510,7 +510,6 @@ if files_our and files_their:
                     "inv_onlar": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].isna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
                     "pay_match": format_clean_view(merged_pay, map_our, map_their, "ODEME"),
                     "ignored_our": ignored_our, "ignored_their": ignored_their, "balance_summary": balance_summary,
-                    # Ham Veriler (Analiz İçin)
                     "prep_our": prep_our, "prep_their": prep_their, "merged_inv": merged_inv
                 }
         except Exception as e:
@@ -559,30 +558,28 @@ if "res" in st.session_state:
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            # Tarih Hatası Düzeltme (Type Enforcement)
+            # Tarih Hatası Düzeltildi
             t_date = pd.Timestamp(target_date)
+            # NaT olanları at, tarihi geçenleri at
+            o_filt = res["prep_our"][pd.to_datetime(res["prep_our"]["std_date"], errors='coerce').le(t_date)]
+            t_filt = res["prep_their"][pd.to_datetime(res["prep_their"]["std_date"], errors='coerce').le(t_date)]
             
-            # Tarihi olanları filtrele (NaT olanlar düşer)
-            our_final = res["prep_our"][pd.to_datetime(res["prep_our"]["std_date"]).le(t_date)]
-            their_final = res["prep_their"][pd.to_datetime(res["prep_their"]["std_date"]).le(t_date)]
-            
-            bal_our = our_final["Signed_TL"].sum()
-            bal_their = their_final["Signed_TL"].sum()
+            bal_our = o_filt["Signed_TL"].sum()
+            bal_their = t_filt["Signed_TL"].sum()
             diff_total = bal_our + bal_their
             
-            # Detaylı Analiz
             m_inv = res["merged_inv"]
-            # Convert to datetime to avoid comparison errors
             d_biz = pd.to_datetime(m_inv["std_date_Biz"], errors='coerce')
             d_onlar = pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce')
             
-            missing_in_them = m_inv[
+            # Eksik Faturalar (Tarihe göre)
+            miss_them = m_inv[
                 (m_inv["Signed_TL_Biz"].notna()) & 
                 (m_inv["Signed_TL_Onlar"].isna()) &
                 (d_biz.le(t_date))
             ]["Signed_TL_Biz"].sum()
             
-            missing_in_us = m_inv[
+            miss_us = m_inv[
                 (m_inv["Signed_TL_Biz"].isna()) & 
                 (m_inv["Signed_TL_Onlar"].notna()) &
                 (d_onlar.le(t_date))
@@ -600,8 +597,8 @@ if "res" in st.session_state:
                     Aradaki toplam <span class="highlight-red">{diff_total:,.2f} TL</span> tutarındaki farkın ana nedenleri:
                 </div>
                 <ul>
-                    <li class="list-item"><b>Bizde Kayıtlı / Sizde Görünmeyen:</b> {missing_in_them:,.2f} TL</li>
-                    <li class="list-item"><b>Sizde Kayıtlı / Bizde Görünmeyen:</b> {missing_in_us:,.2f} TL</li>
+                    <li class="list-item"><b>Bizde Kayıtlı / Sizde Görünmeyen:</b> {miss_them:,.2f} TL</li>
+                    <li class="list-item"><b>Sizde Kayıtlı / Bizde Görünmeyen:</b> {miss_us:,.2f} TL</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
