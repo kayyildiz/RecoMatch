@@ -124,31 +124,58 @@ def parse_amount(val):
         return -f if is_neg else f
     except: return 0.0
 
-# --- GÜÇLENDİRİLMİŞ DOSYA OKUMA (CSV DESTEĞİ) ---
+def smart_date_parser(val):
+    """Farklı formatlardaki tarihleri yakalar."""
+    if pd.isna(val) or val == "":
+        return pd.NaT
+    
+    # Eğer zaten timestamp ise
+    if isinstance(val, pd.Timestamp):
+        return val
+        
+    s = str(val).strip()
+    
+    # Excel serial date (sayısal tarih) kontrolü
+    if s.isdigit() or (s.replace('.', '', 1).isdigit() and float(s) > 30000):
+         try:
+             return pd.to_datetime(float(s), unit='D', origin='1899-12-30')
+         except: pass
+
+    # Yaygın formatlar
+    formats = ['%d.%m.%Y', '%Y-%m-%d', '%d-%m-%Y', '%Y.%m.%d', '%d/%m/%Y', '%m/%d/%Y']
+    
+    for fmt in formats:
+        try:
+            return pd.to_datetime(s, format=fmt)
+        except:
+            continue
+            
+    # Son çare pandas'a bırak
+    try:
+        return pd.to_datetime(s, dayfirst=True)
+    except:
+        return pd.NaT
+
 def read_and_merge(uploaded_files):
     if not uploaded_files: return pd.DataFrame()
     df_list = []
     for f in uploaded_files:
         try:
-            # CSV Akıllı Okuma (Ayırıcıyı otomatik bul)
             if f.name.lower().endswith(".csv"):
+                # CSV okuma denemeleri
                 try:
                     temp_df = pd.read_csv(f, dtype=str, sep=None, engine='python')
                 except:
-                    # Eğer otomatik bulamazsa ; veya , dene
                     f.seek(0)
                     temp_df = pd.read_csv(f, dtype=str, sep=';')
             else:
                 temp_df = pd.read_excel(f, header=0, dtype=str)
             
-            # Boşsa atla
             if temp_df.empty: continue
 
             temp_df.columns = temp_df.columns.astype(str).str.strip()
-            
-            # KRİTİK: Satır No ve Orijinal Index (Sıralama Kaymasını Önler)
             temp_df["Satır_No"] = temp_df.index + 2 
-            temp_df["Orj_Row_Idx"] = temp_df.index # Kayma önleyici
+            temp_df["Orj_Row_Idx"] = temp_df.index
             
             for col in temp_df.columns:
                 if col not in ["Satır_No", "Orj_Row_Idx"]:
@@ -228,10 +255,13 @@ def get_doc_category(val, cfg):
 def prepare_data(df, mapping, role):
     if df.empty: return df
     df = df.copy()
+    
+    # Tarih (GÜÇLENDİRİLMİŞ PARSER)
     c_date = mapping.get("date")
     if c_date and c_date in df.columns:
-        df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce')
-    else: df["std_date"] = pd.NaT
+        df["std_date"] = df[c_date].apply(smart_date_parser)
+    else: 
+        df["std_date"] = pd.NaT
 
     c_type = mapping.get("doc_type")
     type_cfg = mapping.get("type_vals", {})
@@ -274,10 +304,6 @@ def safe_idx(cols, val):
 
 def render_mapping_ui(title, df, default_map, key_prefix):
     st.markdown(f"#### {title} Ayarları")
-    if df.empty:
-        st.warning("Dosya boş veya okunamadı.")
-        return {}
-        
     cols = ["Seçiniz..."] + list(df.columns)
     
     st.caption("Yerel (TL) Tutar")
@@ -350,7 +376,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
     
-    # Tarihleri güvenli formatla
+    # Tarihleri formatla (Hata vermemesi için coerce)
     if "std_date_Biz" in df.columns:
         df["std_date_Biz"] = pd.to_datetime(df["std_date_Biz"], errors='coerce').dt.strftime('%d.%m.%Y')
     if "std_date_Onlar" in df.columns:
@@ -440,9 +466,9 @@ if files_our and files_their:
     df_our = read_and_merge(files_our)
     df_their = read_and_merge(files_their)
     
-    # HATA KORUMASI: Boş dosya uyarısı
+    # HATA KORUMASI: Boş data
     if df_our.empty or df_their.empty:
-        st.warning("Lütfen geçerli ve dolu Excel/CSV dosyaları yükleyiniz.")
+        st.warning("Yüklenen dosyalardan biri boş veya okunamadı.")
     else:
         saved_our = TemplateManager.find_best_match(files_our[0].name)
         saved_their = TemplateManager.find_best_match(files_their[0].name)
@@ -493,23 +519,26 @@ if files_our and files_their:
                     merged_inv["Fark_TL"] = merged_inv["Signed_TL_Biz"].fillna(0) - merged_inv["Signed_TL_Onlar"].fillna(0)
                     merged_inv["Fark_FX"] = merged_inv["Signed_FX_Biz"].fillna(0) - merged_inv["Signed_FX_Onlar"].fillna(0)
 
-                    # --- ÖDEME ---
+                    # --- ÖDEME (GELİŞMİŞ SIRALAMA) ---
                     pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
                     pay_their = prep_their[prep_their["Doc_Category"].str.contains("ODEME")].copy()
                     
-                    # KAYMAYI ÖNLEME: Sıralama ve Rank
+                    # 1. Sıralama
                     pay_our = pay_our.sort_values(by=["std_date", "Signed_TL", "Orj_Row_Idx"])
                     pay_their = pay_their.sort_values(by=["std_date", "Signed_TL", "Orj_Row_Idx"])
 
                     def create_pay_key(df, cfg, scenario):
-                        d = df["std_date"].dt.strftime('%Y-%m-%d').astype(str)
+                        # Tarih boşsa '0000-00-00'
+                        d = df["std_date"].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '0000-00-00')
                         a = df["Signed_TL"].abs().map('{:.2f}'.format)
+                        
                         if "Ödeme No" in scenario:
                             p = df[cfg["pay_no"]].astype(str) if cfg["pay_no"] else ""
                             base_key = d + "_" + p + "_" + a
                         else:
                             cat = df["Doc_Category"].astype(str)
                             base_key = d + "_" + cat + "_" + a
+                        
                         df["_temp_rank"] = df.groupby(base_key).cumcount()
                         return base_key + "_" + df["_temp_rank"].astype(str)
 
@@ -539,7 +568,7 @@ if files_our and files_their:
                         "prep_our": prep_our, "prep_their": prep_their, "merged_inv": merged_inv
                     }
             except Exception as e:
-                st.error(f"Bir hata oluştu: {str(e)}")
+                st.error(f"Hata oluştu: {str(e)}")
 
 if "res" in st.session_state:
     res = st.session_state["res"]
