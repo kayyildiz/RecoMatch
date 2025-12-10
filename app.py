@@ -39,7 +39,7 @@ st.markdown("""
     .neu-val { color: #9ca3af; }
     .border-left-thick { border-left: 2px solid #e5e7eb; }
     
-    /* YORUM KUTUSU */
+    /* Yorum Kutusu */
     .commentary-box {
         background-color: #ffffff; border: 1px solid #e2e8f0; 
         border-radius: 8px; padding: 25px; margin-top: 20px;
@@ -99,7 +99,6 @@ def normalize_currency(val):
     if s in ["USD", "ABDDOLARI", "USDOLLAR", "DOLAR", "$"]: return "USD"
     if s in ["EUR", "EURO", "AVRO", "€"]: return "EUR"
     if s in ["GBP", "STERLIN", "£"]: return "GBP"
-    if s in ["CHF", "ISVICREFRANGI"]: return "CHF"
     return s
 
 def get_invoice_key(raw_val):
@@ -136,8 +135,10 @@ def read_and_merge(uploaded_files):
             
             temp_df.columns = temp_df.columns.astype(str).str.strip()
             temp_df["Satır_No"] = temp_df.index + 2
+            
             for col in temp_df.columns:
                 temp_df[col] = temp_df[col].astype(str).str.strip().replace({'nan': '', 'None': ''})
+                
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
         except Exception as e:
@@ -152,6 +153,7 @@ def calculate_smart_balance(row, role,
                             mode_tl, c_tl_debt, c_tl_credit, c_tl_single, is_tl_signed,
                             mode_fx, c_fx_debt, c_fx_credit, c_fx_single, is_fx_signed,
                             doc_cat):
+    
     calc_sign = 1
     if role == "Biz Alıcı":
         if doc_cat in ["FATURA", "IADE_ODEME"]: calc_sign = 1 
@@ -210,14 +212,11 @@ def get_doc_category(val, cfg):
 def prepare_data(df, mapping, role):
     if df.empty: return df
     df = df.copy()
-    
-    # TARİH DÜZELTMESİ (GÜÇLÜ PARSER)
     c_date = mapping.get("date")
+    # Date parse with coerce to avoid crash
     if c_date and c_date in df.columns:
-        # Errors='coerce' ile bozuk tarihleri NaT (Not a Time) yapar
         df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce')
-    else: 
-        df["std_date"] = pd.NaT
+    else: df["std_date"] = pd.NaT
 
     c_type = mapping.get("doc_type")
     type_cfg = mapping.get("type_vals", {})
@@ -242,8 +241,8 @@ def prepare_data(df, mapping, role):
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
         df["PB_Norm"] = df[c_curr].apply(normalize_currency)
-        df["PB_Norm"] = df["PB_Norm"].replace("", "TL").fillna("TL")
-    else: df["PB_Norm"] = "TL"
+    else:
+        df["PB_Norm"] = "TL"
 
     c_inv = mapping.get("inv_no")
     if c_inv and c_inv in df.columns:
@@ -327,12 +326,12 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 6. GÖRÜNTÜ FORMATLAYICI
+# 6. GÖRÜNTÜ FORMATLAYICI (ONLAR TARİH DÜZELDİ)
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
     
-    # Tarih kolonlarını formatla
+    # Tarih Formatı (Varsa)
     if "std_date_Biz" in df.columns:
         df["std_date_Biz"] = pd.to_datetime(df["std_date_Biz"]).dt.strftime('%d.%m.%Y')
     if "std_date_Onlar" in df.columns:
@@ -449,6 +448,7 @@ if files_our and files_their:
                 inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
                 inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
                 
+                # AGGREGATION FIXED: Tarihi koru
                 def build_agg(mapping):
                     agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
                     if mapping.get("inv_no"): agg[mapping["inv_no"]] = "first"
@@ -474,9 +474,10 @@ if files_our and files_their:
                 pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
                 pay_their = prep_their[prep_their["Doc_Category"].str.contains("ODEME")].copy()
                 
+                # PAY KEY FIXED: Hassas string formatı (%.2f)
                 def create_pay_key(df, cfg, scenario):
-                    d = df["std_date"].astype(str)
-                    a = df["Signed_TL"].abs().round(2).astype(str)
+                    d = df["std_date"].dt.strftime('%Y-%m-%d').astype(str)
+                    a = df["Signed_TL"].abs().map('{:.2f}'.format)
                     if "Ödeme No" in scenario:
                         p = df[cfg["pay_no"]].astype(str) if cfg["pay_no"] else ""
                         base_key = d + "_" + p + "_" + a
@@ -509,10 +510,8 @@ if files_our and files_their:
                     "inv_onlar": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].isna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
                     "pay_match": format_clean_view(merged_pay, map_our, map_their, "ODEME"),
                     "ignored_our": ignored_our, "ignored_their": ignored_their, "balance_summary": balance_summary,
-                    
-                    # Ham veriler (Analiz için)
-                    "prep_our": prep_our, "prep_their": prep_their,
-                    "merged_inv": merged_inv
+                    # Ham Veriler (Analiz İçin)
+                    "prep_our": prep_our, "prep_their": prep_their, "merged_inv": merged_inv
                 }
         except Exception as e:
             st.error(f"Bir hata oluştu: {str(e)}")
@@ -560,33 +559,33 @@ if "res" in st.session_state:
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            t_date = pd.Timestamp(target_date) # NaT riskine karşı düz Timestamp
+            # Tarih Hatası Düzeltme (Type Enforcement)
+            t_date = pd.Timestamp(target_date)
             
-            # Filtrele (NaT kontrolü ile)
-            # Eğer tarih yoksa (NaT), o satırı dahil etme
-            mask_our = res["prep_our"]["std_date"].notna() & (res["prep_our"]["std_date"] <= t_date)
-            mask_their = res["prep_their"]["std_date"].notna() & (res["prep_their"]["std_date"] <= t_date)
-            
-            our_final = res["prep_our"][mask_our]
-            their_final = res["prep_their"][mask_their]
+            # Tarihi olanları filtrele (NaT olanlar düşer)
+            our_final = res["prep_our"][pd.to_datetime(res["prep_our"]["std_date"]).le(t_date)]
+            their_final = res["prep_their"][pd.to_datetime(res["prep_their"]["std_date"]).le(t_date)]
             
             bal_our = our_final["Signed_TL"].sum()
             bal_their = their_final["Signed_TL"].sum()
             diff_total = bal_our + bal_their
             
-            # Detaylar
-            # Bizde Var / Onlarda Yok (Belirli Tarihe Kadar)
+            # Detaylı Analiz
             m_inv = res["merged_inv"]
+            # Convert to datetime to avoid comparison errors
+            d_biz = pd.to_datetime(m_inv["std_date_Biz"], errors='coerce')
+            d_onlar = pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce')
+            
             missing_in_them = m_inv[
                 (m_inv["Signed_TL_Biz"].notna()) & 
                 (m_inv["Signed_TL_Onlar"].isna()) &
-                (pd.to_datetime(m_inv["std_date_Biz"]).le(t_date))
+                (d_biz.le(t_date))
             ]["Signed_TL_Biz"].sum()
             
             missing_in_us = m_inv[
                 (m_inv["Signed_TL_Biz"].isna()) & 
                 (m_inv["Signed_TL_Onlar"].notna()) &
-                (pd.to_datetime(m_inv["std_date_Onlar"]).le(t_date))
+                (d_onlar.le(t_date))
             ]["Signed_TL_Onlar"].sum()
 
             st.markdown(f"""
@@ -604,9 +603,6 @@ if "res" in st.session_state:
                     <li class="list-item"><b>Bizde Kayıtlı / Sizde Görünmeyen:</b> {missing_in_them:,.2f} TL</li>
                     <li class="list-item"><b>Sizde Kayıtlı / Bizde Görünmeyen:</b> {missing_in_us:,.2f} TL</li>
                 </ul>
-                <div style="margin-top:15px; font-size:0.9em; color:#64748b;">
-                    * Bu analiz otomatik oluşturulmuştur.
-                </div>
             </div>
             """, unsafe_allow_html=True)
 
