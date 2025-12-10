@@ -49,7 +49,7 @@ st.markdown("""
     .highlight-blue { color: #2563eb; font-weight: bold; background-color: #eff6ff; padding: 2px 6px; border-radius: 4px; }
     .highlight-red { color: #dc2626; font-weight: bold; background-color: #fef2f2; padding: 2px 6px; border-radius: 4px; }
     .list-item { margin-bottom: 8px; margin-left: 20px; font-size: 0.95rem; }
-    .sub-list { margin-left: 40px; font-size: 0.9rem; color: #64748b; list-style-type: circle; margin-bottom: 4px; }
+    .sub-list { margin-left: 40px; font-size: 0.9rem; color: #64748b; list-style-type: circle; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -437,6 +437,16 @@ if files_our and files_their:
         saved_our = TemplateManager.find_best_match(files_our[0].name)
         saved_their = TemplateManager.find_best_match(files_their[0].name)
         
+        # PREVIEW
+        with st.expander("👀 Dosya Önizlemeleri (İlk 50 Satır)", expanded=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Bizim Taraf")
+                st.dataframe(df_our.head(50))
+            with c2:
+                st.subheader("Karşı Taraf")
+                st.dataframe(df_their.head(50))
+
         c1, c2 = st.columns(2)
         with c1: map_our = render_mapping_ui("Bizim Taraf", df_our, saved_our, "our")
         with c2: map_their = render_mapping_ui("Karşı Taraf", df_their, saved_their, "their")
@@ -481,15 +491,13 @@ if files_our and files_their:
                     
                     merged_inv = pd.merge(grp_our, grp_their, on="key_invoice_norm", how="outer")
                     
-                    # AKILLI FARK HESAPLAMA (Eşleşme)
+                    # FARK (Akıllı Çıkarma: Biz - Onlar)
                     def smart_diff(r, col_biz, col_onlar):
                         v1 = r[col_biz] if pd.notna(r[col_biz]) else 0
                         v2 = r[col_onlar] if pd.notna(r[col_onlar]) else 0
-                        
-                        # İkisi de Aynı İşaretliyse -> ÇIKAR (v1 - v2)
-                        if (v1 > 0 and v2 > 0) or (v1 < 0 and v2 < 0):
-                            return v1 - v2
-                        # Biri + Biri - İse -> TOPLA (v1 + v2)
+                        # Aynı işaretse çıkar
+                        if (v1 > 0 and v2 > 0) or (v1 < 0 and v2 < 0): return v1 - v2
+                        # Zıt işaretse topla
                         return v1 + v2
 
                     merged_inv["Fark_TL"] = merged_inv.apply(lambda r: smart_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
@@ -586,13 +594,13 @@ if "res" in st.session_state:
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            # KEY ERROR FIX: map_our kontrolü
+            # KEY ERROR FIX
             if "map_our" not in res:
                 st.warning("Lütfen analizi tekrar çalıştırın.")
                 st.stop()
 
             t_date = pd.Timestamp(target_date)
-            # Tarihe göre filtrele (NaT dahil)
+            # Tarihe göre filtrele
             def filter_date(df):
                 return df[pd.to_datetime(df["std_date"], errors='coerce').le(t_date)]
 
@@ -601,18 +609,18 @@ if "res" in st.session_state:
             
             bal_our = o_filt["Signed_TL"].sum()
             bal_their = t_filt["Signed_TL"].sum()
-            
-            # Akıllı Fark: İşaretler aynıysa çıkar
-            diff_total = bal_our - bal_their if (bal_our>0 and bal_their>0) or (bal_our<0 and bal_their<0) else bal_our + bal_their
+            diff_total = bal_our - bal_their if (bal_our*bal_their > 0) else bal_our + bal_their
             
             # --- DETAY HESAPLAMA ---
             m_inv = res["merged_inv"]
-            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"]).le(t_date) | pd.to_datetime(m_inv["std_date_Onlar"]).le(t_date))
+            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"], errors='coerce').le(t_date) | 
+                        pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce').le(t_date))
             match_inv_diff_tl = m_inv[(m_inv["Fark_TL"] != 0) & mask_inv]["Fark_TL"].sum()
             match_inv_diff_fx = m_inv[(m_inv["Fark_FX"] != 0) & mask_inv]["Fark_FX"].sum()
             
             m_pay = res["merged_pay"]
-            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"]).le(t_date) | pd.to_datetime(m_pay["std_date_Onlar"]).le(t_date))
+            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"], errors='coerce').le(t_date) | 
+                        pd.to_datetime(m_pay["std_date_Onlar"], errors='coerce').le(t_date))
             match_pay_diff_tl = m_pay[(m_pay["Fark_TL"] != 0) & mask_pay]["Fark_TL"].sum()
             match_pay_diff_fx = m_pay[(m_pay["Fark_FX"] != 0) & mask_pay]["Fark_FX"].sum()
             
@@ -620,11 +628,8 @@ if "res" in st.session_state:
             def get_ign_sum(df, map_cfg):
                 df_f = filter_date(df)
                 if df_f.empty: return []
-                # Kullanıcının seçtiği "Belge Türü" kolonunu al
                 col_name = map_cfg.get("doc_type")
-                # Eğer kolon yoksa veya boşsa işlem yapma
                 if not col_name or col_name not in df_f.columns: return []
-                
                 grp = df_f.groupby(col_name)[["Signed_TL", "Signed_FX"]].sum().reset_index()
                 return [f"{r[col_name]}: {r['Signed_TL']:,.2f} TL / {r['Signed_FX']:,.2f} FX" for _, r in grp.iterrows()]
 
