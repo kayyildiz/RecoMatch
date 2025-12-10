@@ -39,15 +39,17 @@ st.markdown("""
     .neu-val { color: #9ca3af; }
     .border-left-thick { border-left: 2px solid #e5e7eb; }
     
-    /* Yorum Kutusu Stili */
+    /* YORUM KUTUSU */
     .commentary-box {
-        background-color: #fff; border: 1px solid #e2e8f0; 
-        border-radius: 8px; padding: 20px; margin-top: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        background-color: #ffffff; border: 1px solid #e2e8f0; 
+        border-radius: 8px; padding: 25px; margin-top: 20px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
     }
-    .commentary-header { font-size: 1.2rem; font-weight: bold; color: #1e3a8a; margin-bottom: 15px; }
-    .commentary-item { margin-bottom: 8px; font-size: 1rem; color: #475569; }
-    .highlight { font-weight: bold; color: #b91c1c; }
+    .commentary-header { font-size: 1.3rem; font-weight: 800; color: #1e3a8a; margin-bottom: 20px; border-bottom: 2px solid #f1f5f9; padding-bottom: 10px; }
+    .commentary-text { font-size: 1rem; line-height: 1.6; color: #334155; margin-bottom: 15px; }
+    .highlight-blue { color: #2563eb; font-weight: bold; background-color: #eff6ff; padding: 2px 6px; border-radius: 4px; }
+    .highlight-red { color: #dc2626; font-weight: bold; background-color: #fef2f2; padding: 2px 6px; border-radius: 4px; }
+    .list-item { margin-bottom: 8px; margin-left: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,10 +136,8 @@ def read_and_merge(uploaded_files):
             
             temp_df.columns = temp_df.columns.astype(str).str.strip()
             temp_df["Satır_No"] = temp_df.index + 2
-            
             for col in temp_df.columns:
                 temp_df[col] = temp_df[col].astype(str).str.strip().replace({'nan': '', 'None': ''})
-                
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
         except Exception as e:
@@ -152,7 +152,6 @@ def calculate_smart_balance(row, role,
                             mode_tl, c_tl_debt, c_tl_credit, c_tl_single, is_tl_signed,
                             mode_fx, c_fx_debt, c_fx_credit, c_fx_single, is_fx_signed,
                             doc_cat):
-    
     calc_sign = 1
     if role == "Biz Alıcı":
         if doc_cat in ["FATURA", "IADE_ODEME"]: calc_sign = 1 
@@ -211,10 +210,14 @@ def get_doc_category(val, cfg):
 def prepare_data(df, mapping, role):
     if df.empty: return df
     df = df.copy()
+    
+    # TARİH DÜZELTMESİ (GÜÇLÜ PARSER)
     c_date = mapping.get("date")
     if c_date and c_date in df.columns:
-        df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce').dt.date
-    else: df["std_date"] = None
+        # Errors='coerce' ile bozuk tarihleri NaT (Not a Time) yapar
+        df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce')
+    else: 
+        df["std_date"] = pd.NaT
 
     c_type = mapping.get("doc_type")
     type_cfg = mapping.get("type_vals", {})
@@ -236,7 +239,6 @@ def prepare_data(df, mapping, role):
     df["Signed_TL"] = res[0]
     df["Signed_FX"] = res[1]
 
-    # Para Birimi
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
         df["PB_Norm"] = df[c_curr].apply(normalize_currency)
@@ -329,6 +331,13 @@ def render_mapping_ui(title, df, default_map, key_prefix):
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
+    
+    # Tarih kolonlarını formatla
+    if "std_date_Biz" in df.columns:
+        df["std_date_Biz"] = pd.to_datetime(df["std_date_Biz"]).dt.strftime('%d.%m.%Y')
+    if "std_date_Onlar" in df.columns:
+        df["std_date_Onlar"] = pd.to_datetime(df["std_date_Onlar"]).dt.strftime('%d.%m.%Y')
+
     cols_our, rename_our = [], {}
     
     # Bizim Taraf
@@ -494,7 +503,6 @@ if files_our and files_their:
                 balance_summary["Net_Fark_TL"] = balance_summary["Signed_TL_Biz"] + balance_summary["Signed_TL_Onlar"]
                 balance_summary["Net_Fark_FX"] = balance_summary["Signed_FX_Biz"] + balance_summary["Signed_FX_Onlar"]
 
-                # --- RES SAKLAMA (HAM VERİ EKLENDİ) ---
                 st.session_state["res"] = {
                     "inv_match": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
                     "inv_bizde": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].isna()], map_our, map_their, "FATURA"),
@@ -502,9 +510,9 @@ if files_our and files_their:
                     "pay_match": format_clean_view(merged_pay, map_our, map_their, "ODEME"),
                     "ignored_our": ignored_our, "ignored_their": ignored_their, "balance_summary": balance_summary,
                     
-                    # YENİ: Analiz Yorum için Ham Veriler
+                    # Ham veriler (Analiz için)
                     "prep_our": prep_our, "prep_their": prep_their,
-                    "merged_inv": merged_inv, "merged_pay": merged_pay
+                    "merged_inv": merged_inv
                 }
         except Exception as e:
             st.error(f"Bir hata oluştu: {str(e)}")
@@ -547,73 +555,57 @@ if "res" in st.session_state:
         with c1: st.write("Bizim Kapsam Dışı"); st.dataframe(res["ignored_our"])
         with c2: st.write("Onların Kapsam Dışı"); st.dataframe(res["ignored_their"])
         
-    # --- YENİ: ANALİZ YORUM SEKMESİ ---
     with tab6:
         st.subheader("📅 Tarih Bazlı Mutabakat Analizi")
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            t_date = pd.Timestamp(target_date)
+            t_date = pd.Timestamp(target_date) # NaT riskine karşı düz Timestamp
             
-            # 1. Filtrele (Tarihe Göre)
-            our_final = res["prep_our"][res["prep_our"]["std_date"] <= t_date]
-            their_final = res["prep_their"][res["prep_their"]["std_date"] <= t_date]
+            # Filtrele (NaT kontrolü ile)
+            # Eğer tarih yoksa (NaT), o satırı dahil etme
+            mask_our = res["prep_our"]["std_date"].notna() & (res["prep_our"]["std_date"] <= t_date)
+            mask_their = res["prep_their"]["std_date"].notna() & (res["prep_their"]["std_date"] <= t_date)
             
-            # 2. Bakiye Hesapla (TL)
+            our_final = res["prep_our"][mask_our]
+            their_final = res["prep_their"][mask_their]
+            
             bal_our = our_final["Signed_TL"].sum()
             bal_their = their_final["Signed_TL"].sum()
-            diff_total = bal_our + bal_their # (Biri + Biri - olduğu için toplam farkı verir)
+            diff_total = bal_our + bal_their
             
-            # 3. Detaylara İn
-            # A) Bizde Olup Onlarda Olmayanlar
-            missing_in_them = res["merged_inv"][
-                (res["merged_inv"]["Signed_TL_Biz"].notna()) & 
-                (res["merged_inv"]["Signed_TL_Onlar"].isna()) &
-                (res["merged_inv"]["std_date_Biz"] <= t_date)
+            # Detaylar
+            # Bizde Var / Onlarda Yok (Belirli Tarihe Kadar)
+            m_inv = res["merged_inv"]
+            missing_in_them = m_inv[
+                (m_inv["Signed_TL_Biz"].notna()) & 
+                (m_inv["Signed_TL_Onlar"].isna()) &
+                (pd.to_datetime(m_inv["std_date_Biz"]).le(t_date))
             ]["Signed_TL_Biz"].sum()
             
-            # B) Onlarda Olup Bizde Olmayanlar
-            missing_in_us = res["merged_inv"][
-                (res["merged_inv"]["Signed_TL_Biz"].isna()) & 
-                (res["merged_inv"]["Signed_TL_Onlar"].notna()) &
-                (res["merged_inv"]["std_date_Onlar"] <= t_date)
+            missing_in_us = m_inv[
+                (m_inv["Signed_TL_Biz"].isna()) & 
+                (m_inv["Signed_TL_Onlar"].notna()) &
+                (pd.to_datetime(m_inv["std_date_Onlar"]).le(t_date))
             ]["Signed_TL_Onlar"].sum()
-            
-            # C) Tutar/Kur Farkları (Eşleşen ama farkı olan)
-            match_diff = res["merged_inv"][
-                (res["merged_inv"]["Fark_TL"] != 0) & 
-                (res["merged_inv"]["Signed_TL_Biz"].notna()) & 
-                (res["merged_inv"]["Signed_TL_Onlar"].notna())
-            ]
-            # Tarih kontrolü (Her iki taraf da o tarihten önceyse)
-            match_diff_val = 0
-            for idx, r in match_diff.iterrows():
-                d1 = r["std_date_Biz"]
-                d2 = r["std_date_Onlar"]
-                if (pd.notna(d1) and d1 <= t_date) or (pd.notna(d2) and d2 <= t_date):
-                    match_diff_val += r["Fark_TL"]
 
-            # YORUM METNİ
             st.markdown(f"""
             <div class="commentary-box">
                 <div class="commentary-header">📌 {target_date.strftime('%d.%m.%Y')} Tarihli Mutabakat Raporu</div>
-                <div class="commentary-item">Sayın Yetkili,</div>
-                <div class="commentary-item">
+                <div class="commentary-text">
                     Şirketimiz kayıtlarına göre <b>{target_date.strftime('%d.%m.%Y')}</b> tarihi itibariyle bakiyemiz 
-                    <span class="highlight">{bal_our:,.2f} TL</span> seviyesindedir. 
-                    Sizin kayıtlarınızda ise bu tutar <span class="highlight">{bal_their:,.2f} TL</span> olarak hesaplanmıştır.
+                    <span class="highlight-blue">{bal_our:,.2f} TL</span> seviyesindedir. 
+                    Karşı taraf kayıtlarında ise bu tutar <span class="highlight-blue">{bal_their:,.2f} TL</span> olarak görünmektedir.
                 </div>
-                <div class="commentary-item">
-                    Aradaki toplam <span class="highlight">{diff_total:,.2f} TL</span> tutarındaki farkın ana nedenleri aşağıda özetlenmiştir:
+                <div class="commentary-text">
+                    Aradaki toplam <span class="highlight-red">{diff_total:,.2f} TL</span> tutarındaki farkın ana nedenleri:
                 </div>
-                <hr>
                 <ul>
-                    <li><b>Bizde Kayıtlı / Sizde Görünmeyen Faturalar:</b> {missing_in_them:,.2f} TL (Zamanlama farkı veya eksik kayıt olabilir)</li>
-                    <li><b>Sizde Kayıtlı / Bizde Görünmeyen Faturalar:</b> {missing_in_us:,.2f} TL (Henüz bize ulaşmamış veya işlenmemiş faturalar)</li>
-                    <li><b>Kur/Tutar Farkları:</b> {match_diff_val:,.2f} TL (Eşleşen belgelerdeki kur veya küsurat farkları)</li>
+                    <li class="list-item"><b>Bizde Kayıtlı / Sizde Görünmeyen:</b> {missing_in_them:,.2f} TL</li>
+                    <li class="list-item"><b>Sizde Kayıtlı / Bizde Görünmeyen:</b> {missing_in_us:,.2f} TL</li>
                 </ul>
-                <div class="commentary-item" style="margin-top:15px; font-size:0.9em; color:#64748b;">
-                    * Not: Bu analiz, yüklenen excel verileri üzerinden otomatik oluşturulmuştur.
+                <div style="margin-top:15px; font-size:0.9em; color:#64748b;">
+                    * Bu analiz otomatik oluşturulmuştur.
                 </div>
             </div>
             """, unsafe_allow_html=True)
