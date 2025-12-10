@@ -49,7 +49,7 @@ st.markdown("""
     .highlight-blue { color: #2563eb; font-weight: bold; background-color: #eff6ff; padding: 2px 6px; border-radius: 4px; }
     .highlight-red { color: #dc2626; font-weight: bold; background-color: #fef2f2; padding: 2px 6px; border-radius: 4px; }
     .list-item { margin-bottom: 8px; margin-left: 20px; font-size: 0.95rem; }
-    .sub-list { margin-left: 40px; font-size: 0.9rem; color: #64748b; list-style-type: circle; }
+    .sub-list { margin-left: 40px; font-size: 0.9rem; color: #64748b; list-style-type: circle; margin-bottom: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -376,7 +376,6 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         if (ec+"_Biz") in df.columns:
             cols_our.append(ec+"_Biz"); rename_our[ec+"_Biz"] = f"{ec} (Biz)"
 
-    # Karşı Taraf
     cols_their, rename_their = [], {}
     if "Kaynak_Dosya_Onlar" in df.columns: cols_their.append("Kaynak_Dosya_Onlar"); rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
 
@@ -438,18 +437,6 @@ if files_our and files_their:
         saved_our = TemplateManager.find_best_match(files_our[0].name)
         saved_their = TemplateManager.find_best_match(files_their[0].name)
         
-        # PREVIEW
-        with st.expander("👀 Yüklenen Dosya Önizlemeleri (İlk 100 Satır)", expanded=False):
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader("Bizim Taraf")
-                st.dataframe(df_our.head(100))
-                st.caption(f"Toplam Satır: {len(df_our)}")
-            with c2:
-                st.subheader("Karşı Taraf")
-                st.dataframe(df_their.head(100))
-                st.caption(f"Toplam Satır: {len(df_their)}")
-
         c1, c2 = st.columns(2)
         with c1: map_our = render_mapping_ui("Bizim Taraf", df_our, saved_our, "our")
         with c2: map_their = render_mapping_ui("Karşı Taraf", df_their, saved_their, "their")
@@ -494,14 +481,19 @@ if files_our and files_their:
                     
                     merged_inv = pd.merge(grp_our, grp_their, on="key_invoice_norm", how="outer")
                     
-                    # FARK (Biz - Onlar)
-                    def simple_diff(r, col_biz, col_onlar):
+                    # AKILLI FARK HESAPLAMA (Eşleşme)
+                    def smart_diff(r, col_biz, col_onlar):
                         v1 = r[col_biz] if pd.notna(r[col_biz]) else 0
                         v2 = r[col_onlar] if pd.notna(r[col_onlar]) else 0
-                        return v1 - v2
+                        
+                        # İkisi de Aynı İşaretliyse -> ÇIKAR (v1 - v2)
+                        if (v1 > 0 and v2 > 0) or (v1 < 0 and v2 < 0):
+                            return v1 - v2
+                        # Biri + Biri - İse -> TOPLA (v1 + v2)
+                        return v1 + v2
 
-                    merged_inv["Fark_TL"] = merged_inv.apply(lambda r: simple_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
-                    merged_inv["Fark_FX"] = merged_inv.apply(lambda r: simple_diff(r, "Signed_FX_Biz", "Signed_FX_Onlar"), axis=1)
+                    merged_inv["Fark_TL"] = merged_inv.apply(lambda r: smart_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
+                    merged_inv["Fark_FX"] = merged_inv.apply(lambda r: smart_diff(r, "Signed_FX_Biz", "Signed_FX_Onlar"), axis=1)
 
                     # --- ÖDEME ---
                     pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
@@ -529,16 +521,15 @@ if files_our and files_their:
                     pay_their = force_suffix(pay_their, "_Onlar", "match_key")
 
                     merged_pay = pd.merge(pay_our, pay_their, on="match_key", how="outer")
-                    # ÖDEMEDE FARK (BİZ - ONLAR)
-                    merged_pay["Fark_TL"] = merged_pay.apply(lambda r: simple_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
-                    merged_pay["Fark_FX"] = merged_pay.apply(lambda r: simple_diff(r, "Signed_FX_Biz", "Signed_FX_Onlar"), axis=1)
+                    merged_pay["Fark_TL"] = merged_pay.apply(lambda r: smart_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
+                    merged_pay["Fark_FX"] = merged_pay.apply(lambda r: smart_diff(r, "Signed_FX_Biz", "Signed_FX_Onlar"), axis=1)
 
                     # --- BAKİYE ---
                     our_bal = prep_our.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
                     their_bal = prep_their.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
                     balance_summary = pd.merge(our_bal, their_bal, on="PB_Norm", how="outer", suffixes=("_Biz", "_Onlar")).fillna(0)
-                    balance_summary["Net_Fark_TL"] = balance_summary.apply(lambda r: simple_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
-                    balance_summary["Net_Fark_FX"] = balance_summary.apply(lambda r: simple_diff(r, "Signed_FX_Biz", "Signed_FX_Onlar"), axis=1)
+                    balance_summary["Net_Fark_TL"] = balance_summary.apply(lambda r: smart_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
+                    balance_summary["Net_Fark_FX"] = balance_summary.apply(lambda r: smart_diff(r, "Signed_FX_Biz", "Signed_FX_Onlar"), axis=1)
 
                     st.session_state["res"] = {
                         "inv_match": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
@@ -595,9 +586,9 @@ if "res" in st.session_state:
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            # GÜVENLİK KİLİDİ: Veriler yoksa uyar
+            # KEY ERROR FIX: map_our kontrolü
             if "map_our" not in res:
-                st.warning("Lütfen analizi tekrar çalıştırın (Sayfayı yenileyin).")
+                st.warning("Lütfen analizi tekrar çalıştırın.")
                 st.stop()
 
             t_date = pd.Timestamp(target_date)
@@ -610,27 +601,28 @@ if "res" in st.session_state:
             
             bal_our = o_filt["Signed_TL"].sum()
             bal_their = t_filt["Signed_TL"].sum()
-            diff_total = bal_our - bal_their
+            
+            # Akıllı Fark: İşaretler aynıysa çıkar
+            diff_total = bal_our - bal_their if (bal_our>0 and bal_their>0) or (bal_our<0 and bal_their<0) else bal_our + bal_their
             
             # --- DETAY HESAPLAMA ---
             m_inv = res["merged_inv"]
-            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"], errors='coerce').le(t_date) | 
-                        pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce').le(t_date))
+            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"]).le(t_date) | pd.to_datetime(m_inv["std_date_Onlar"]).le(t_date))
             match_inv_diff_tl = m_inv[(m_inv["Fark_TL"] != 0) & mask_inv]["Fark_TL"].sum()
             match_inv_diff_fx = m_inv[(m_inv["Fark_FX"] != 0) & mask_inv]["Fark_FX"].sum()
             
             m_pay = res["merged_pay"]
-            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"], errors='coerce').le(t_date) | 
-                        pd.to_datetime(m_pay["std_date_Onlar"], errors='coerce').le(t_date))
+            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"]).le(t_date) | pd.to_datetime(m_pay["std_date_Onlar"]).le(t_date))
             match_pay_diff_tl = m_pay[(m_pay["Fark_TL"] != 0) & mask_pay]["Fark_TL"].sum()
             match_pay_diff_fx = m_pay[(m_pay["Fark_FX"] != 0) & mask_pay]["Fark_FX"].sum()
             
-            # KAPSAM DIŞI DETAY (GÜVENLİ KOLON ÇEKİMİ)
+            # KAPSAM DIŞI DETAY (DOĞRU KOLON ADI İLE)
             def get_ign_sum(df, map_cfg):
                 df_f = filter_date(df)
                 if df_f.empty: return []
-                # Kullanıcı hangi kolonu Belge Türü seçtiyse onu al
+                # Kullanıcının seçtiği "Belge Türü" kolonunu al
                 col_name = map_cfg.get("doc_type")
+                # Eğer kolon yoksa veya boşsa işlem yapma
                 if not col_name or col_name not in df_f.columns: return []
                 
                 grp = df_f.groupby(col_name)[["Signed_TL", "Signed_FX"]].sum().reset_index()
