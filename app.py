@@ -32,6 +32,7 @@ st.markdown("""
         color: #374151; font-family: 'Segoe UI Mono', monospace;
     }
     .mini-table td:first-child { text-align: left; font-family: sans-serif; font-weight: 600; color: #111827; }
+    
     .pos-val { color: #059669; font-weight: 700; }
     .neg-val { color: #dc2626; font-weight: 700; }
     .neu-val { color: #9ca3af; }
@@ -79,36 +80,38 @@ def normalize_text(s):
     return s
 
 def normalize_currency(val):
-    """TRY ve TL'yi, USD ve ABD Dolarını birleştirir."""
+    """TRY ve TL'yi birleştirir."""
+    if pd.isna(val): return "TL"
     s = normalize_text(val)
-    if s in ["TRY", "TRL", "TURK LIRASI", "TL"]: return "TL"
+    # Eşanlamlılar
+    if s in ["TRY", "TRL", "TURK LIRASI", "TURKLIRASI", "TL"]: return "TL"
     if s in ["USD", "ABD DOLARI", "US DOLLAR", "DOLAR"]: return "USD"
     if s in ["EUR", "EURO", "AVRO"]: return "EUR"
     if s in ["GBP", "STERLIN"]: return "GBP"
     return s
 
 def get_invoice_key(raw_val):
-    # Tip dönüşümü hatasını önlemek için önce string yap
-    raw_val = str(raw_val)
-    clean = re.sub(r'[^A-Z0-9]', '', normalize_text(raw_val))
+    # Sayı/Metin karışıklığını önlemek için stringe çevir
+    val_str = str(raw_val)
+    if val_str.endswith('.0'): val_str = val_str[:-2] # 123.0 -> 123
+    clean = re.sub(r'[^A-Z0-9]', '', normalize_text(val_str))
     return clean
 
 def parse_amount(val):
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
-    
     s = str(val).strip()
-    is_negative = s.startswith("-")
+    is_neg = s.startswith("-") or ("(" in s and ")" in s) # Muhasebe formatı (100) -> -100
     s = re.sub(r"[^\d.,]", "", s)
     if not s: return 0.0
-    
     try:
+        # TR: 1.000,50 / US: 1,000.50
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
             else: s = s.replace(",", "")
         elif "," in s: s = s.replace(",", ".")
-        val_float = float(s)
-        return -val_float if is_negative else val_float
+        f = float(s)
+        return -f if is_neg else f
     except: return 0.0
 
 def read_and_merge(uploaded_files):
@@ -116,11 +119,15 @@ def read_and_merge(uploaded_files):
     df_list = []
     for f in uploaded_files:
         try:
-            temp_df = pd.read_excel(f, header=0)
+            # Header=0 (İlk satır başlık)
+            temp_df = pd.read_excel(f, header=0, dtype=str) # Tümünü string oku (Güvenli)
             temp_df["Satır_No"] = temp_df.index + 2 
-            temp_df.columns = temp_df.columns.astype(str)
-            for col in temp_df.select_dtypes(include=['object']).columns:
-                temp_df[col] = temp_df[col].astype(str).str.strip()
+            # Kolon adlarını temizle
+            temp_df.columns = temp_df.columns.str.strip()
+            # Object verileri temizle
+            for col in temp_df.columns:
+                temp_df[col] = temp_df[col].str.strip()
+                
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
         except Exception as e:
@@ -135,6 +142,7 @@ def calculate_smart_balance(row, role,
                             mode_fx, c_fx_debt, c_fx_credit, c_fx_single, is_fx_signed,
                             doc_cat):
     
+    # 1. Varsayılan İşaret
     calc_sign = 1
     if role == "Biz Alıcı":
         if doc_cat in ["FATURA", "IADE_ODEME"]: calc_sign = 1 
@@ -169,6 +177,7 @@ def calculate_smart_balance(row, role,
             if is_fx_signed:
                 fx_net = raw_fx
             else:
+                # Akıllı Yön Tespiti (TL'ye bak)
                 if mode_tl == "separate":
                     if tl_debt_val > 0: fx_net = -abs(raw_fx)
                     elif tl_credit_val > 0: fx_net = abs(raw_fx)
@@ -193,6 +202,8 @@ def get_doc_category(val, cfg):
 def prepare_data(df, mapping, role):
     if df.empty: return df
     df = df.copy()
+    
+    # Tarih (Excel string okunduğu için datetime'a zorla)
     c_date = mapping.get("date")
     if c_date and c_date in df.columns:
         df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce').dt.date
@@ -218,17 +229,16 @@ def prepare_data(df, mapping, role):
     df["Signed_TL"] = res[0]
     df["Signed_FX"] = res[1]
 
-    # PARA BİRİMİ NORMALİZASYONU (TRY -> TL)
+    # Para Birimi (TRY -> TL)
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
-        df["PB_Norm"] = df[c_curr].apply(normalize_currency) # Yeni fonksiyonu kullan
+        df["PB_Norm"] = df[c_curr].apply(normalize_currency)
         df["PB_Norm"] = df["PB_Norm"].replace("", "TL").fillna("TL")
     else: df["PB_Norm"] = "TL"
 
     c_inv = mapping.get("inv_no")
     if c_inv and c_inv in df.columns:
-        # Stringe çevirip key üret (Hata önleyici)
-        df["key_invoice_norm"] = df[c_inv].astype(str).apply(get_invoice_key)
+        df["key_invoice_norm"] = df[c_inv].apply(get_invoice_key)
     else: df["key_invoice_norm"] = ""
     return df
 
@@ -305,7 +315,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 6. GÖRÜNTÜ FORMATLAYICI
+# 6. GÖRÜNTÜ FORMATLAYICI (GÜÇLENDİRİLDİ)
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
@@ -318,7 +328,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     our_inv = map_our.get("inv_no")
     if our_inv and (our_inv + "_Biz") in df.columns:
         cols_our.append(our_inv + "_Biz")
-        rename_our[our_inv + "_Biz"] = "Fatura No (Biz)" if type == "FATURA" else "İlgili Fatura (Biz)"
+        rename_our[our_inv + "_Biz"] = "Fatura No (Biz)"
 
     our_pay = map_our.get("pay_no")
     if type != "FATURA" and our_pay and (our_pay + "_Biz") in df.columns:
@@ -343,7 +353,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     their_inv = map_their.get("inv_no")
     if their_inv and (their_inv + "_Onlar") in df.columns:
         cols_their.append(their_inv + "_Onlar")
-        rename_their[their_inv + "_Onlar"] = "Fatura No (Onlar)" if type == "FATURA" else "İlgili Fatura (Onlar)"
+        rename_their[their_inv + "_Onlar"] = "Fatura No (Onlar)"
 
     their_pay = map_their.get("pay_no")
     if type != "FATURA" and their_pay and (their_pay + "_Onlar") in df.columns:
@@ -363,14 +373,19 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     final_cols = cols_our + cols_their + ["Fark_TL", "Fark_FX"]
     final_rename = {**rename_our, **rename_their, "Fark_TL": "Fark (TL)", "Fark_FX": "Fark (FX)"}
     
+    # Eksik kolonları atla (Hata önleyici)
     existing = [c for c in final_cols if c in df.columns]
-    return df[existing].rename(columns=final_rename)
+    
+    # Arrow compatibility için object'leri string yap
+    out_df = df[existing].rename(columns=final_rename)
+    for c in out_df.columns:
+        if out_df[c].dtype == 'object': out_df[c] = out_df[c].astype(str)
+    return out_df
 
 # ==========================================
 # 7. MAIN FLOW
 # ==========================================
 def force_suffix(df, suffix, key_col):
-    """Zorla suffix ekle, merge key hariç."""
     new_cols = {}
     for c in df.columns:
         if c == key_col: continue
@@ -398,86 +413,89 @@ if files_our and files_their:
     with c2: map_their = render_mapping_ui("Karşı Taraf", df_their, saved_their, "their")
 
     if analyze_btn:
-        if not map_our.get("inv_no") or not map_their.get("inv_no"):
-            st.error("HATA: 'Fatura No' seçimi zorunludur!")
-            st.stop()
+        try:
+            if not map_our.get("inv_no") or not map_their.get("inv_no"):
+                st.error("HATA: 'Fatura No' seçimi zorunludur!")
+                st.stop()
 
-        TemplateManager.update_template(files_our[0].name, map_our)
-        TemplateManager.update_template(files_their[0].name, map_their)
-        
-        with st.spinner("Hesaplanıyor..."):
-            prep_our = prepare_data(df_our, map_our, role)
-            role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
-            prep_their = prepare_data(df_their, map_their, role_their)
-
-            ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
-            ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
-
-            # --- EŞLEŞTİRME ---
-            inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
-            inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
+            TemplateManager.update_template(files_our[0].name, map_our)
+            TemplateManager.update_template(files_their[0].name, map_their)
             
-            def build_agg(mapping):
-                agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
-                if mapping.get("inv_no"): agg[mapping["inv_no"]] = "first"
-                if mapping.get("pay_no"): agg[mapping["pay_no"]] = "first"
-                if mapping.get("curr"): agg[mapping["curr"]] = "first" 
-                for ec in mapping.get("extra_cols", []): agg[ec] = "first"
-                return agg
+            with st.spinner("Hesaplanıyor..."):
+                prep_our = prepare_data(df_our, map_our, role)
+                role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
+                prep_their = prepare_data(df_their, map_their, role_their)
 
-            gk_our = ["key_invoice_norm"] + ([map_our["curr"]] if map_our["curr"] else [])
-            gk_their = ["key_invoice_norm"] + ([map_their["curr"]] if map_their["curr"] else [])
-            
-            grp_our = inv_our.groupby(gk_our, as_index=False).agg(build_agg(map_our))
-            grp_their = inv_their.groupby(gk_their, as_index=False).agg(build_agg(map_their))
-            
-            grp_our = force_suffix(grp_our, "_Biz", "key_invoice_norm")
-            grp_their = force_suffix(grp_their, "_Onlar", "key_invoice_norm")
-            
-            merged_inv = pd.merge(grp_our, grp_their, on="key_invoice_norm", how="outer")
-            merged_inv["Fark_TL"] = merged_inv["Signed_TL_Biz"].fillna(0) - merged_inv["Signed_TL_Onlar"].fillna(0)
-            merged_inv["Fark_FX"] = merged_inv["Signed_FX_Biz"].fillna(0) - merged_inv["Signed_FX_Onlar"].fillna(0)
+                ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
+                ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
 
-            # --- ÖDEME ---
-            pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
-            pay_their = prep_their[prep_their["Doc_Category"].str.contains("ODEME")].copy()
-            
-            def create_pay_key(df, cfg, scenario):
-                d = df["std_date"].astype(str)
-                a = df["Signed_TL"].abs().round(2).astype(str)
-                if "Ödeme No" in scenario:
-                    p = df[cfg["pay_no"]].astype(str) if cfg["pay_no"] else ""
-                    base_key = d + "_" + p + "_" + a
-                else:
-                    cat = df["Doc_Category"].astype(str)
-                    base_key = d + "_" + cat + "_" + a
-                df["_temp_rank"] = df.groupby(base_key).cumcount()
-                return base_key + "_" + df["_temp_rank"].astype(str)
+                # --- EŞLEŞTİRME ---
+                inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
+                inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
+                
+                def build_agg(mapping):
+                    agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
+                    if mapping.get("inv_no"): agg[mapping["inv_no"]] = "first"
+                    if mapping.get("pay_no"): agg[mapping["pay_no"]] = "first"
+                    if mapping.get("curr"): agg[mapping["curr"]] = "first" 
+                    for ec in mapping.get("extra_cols", []): agg[ec] = "first"
+                    return agg
 
-            pay_our["match_key"] = create_pay_key(pay_our, map_our, pay_scenario)
-            pay_their["match_key"] = create_pay_key(pay_their, map_their, pay_scenario)
-            
-            pay_our = force_suffix(pay_our, "_Biz", "match_key")
-            pay_their = force_suffix(pay_their, "_Onlar", "match_key")
+                gk_our = ["key_invoice_norm"] + ([map_our["curr"]] if map_our["curr"] else [])
+                gk_their = ["key_invoice_norm"] + ([map_their["curr"]] if map_their["curr"] else [])
+                
+                grp_our = inv_our.groupby(gk_our, as_index=False).agg(build_agg(map_our))
+                grp_their = inv_their.groupby(gk_their, as_index=False).agg(build_agg(map_their))
+                
+                grp_our = force_suffix(grp_our, "_Biz", "key_invoice_norm")
+                grp_their = force_suffix(grp_their, "_Onlar", "key_invoice_norm")
+                
+                merged_inv = pd.merge(grp_our, grp_their, on="key_invoice_norm", how="outer")
+                merged_inv["Fark_TL"] = merged_inv["Signed_TL_Biz"].fillna(0) - merged_inv["Signed_TL_Onlar"].fillna(0)
+                merged_inv["Fark_FX"] = merged_inv["Signed_FX_Biz"].fillna(0) - merged_inv["Signed_FX_Onlar"].fillna(0)
 
-            merged_pay = pd.merge(pay_our, pay_their, on="match_key", how="outer")
-            merged_pay["Fark_TL"] = merged_pay["Signed_TL_Biz"].fillna(0) + merged_pay["Signed_TL_Onlar"].fillna(0)
-            merged_pay["Fark_FX"] = merged_pay["Signed_FX_Biz"].fillna(0) + merged_pay["Signed_FX_Onlar"].fillna(0)
+                # --- ÖDEME ---
+                pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
+                pay_their = prep_their[prep_their["Doc_Category"].str.contains("ODEME")].copy()
+                
+                def create_pay_key(df, cfg, scenario):
+                    d = df["std_date"].astype(str)
+                    a = df["Signed_TL"].abs().round(2).astype(str)
+                    if "Ödeme No" in scenario:
+                        p = df[cfg["pay_no"]].astype(str) if cfg["pay_no"] else ""
+                        base_key = d + "_" + p + "_" + a
+                    else:
+                        cat = df["Doc_Category"].astype(str)
+                        base_key = d + "_" + cat + "_" + a
+                    df["_temp_rank"] = df.groupby(base_key).cumcount()
+                    return base_key + "_" + df["_temp_rank"].astype(str)
 
-            # --- BAKİYE ---
-            our_bal = prep_our.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
-            their_bal = prep_their.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
-            balance_summary = pd.merge(our_bal, their_bal, on="PB_Norm", how="outer", suffixes=("_Biz", "_Onlar")).fillna(0)
-            balance_summary["Net_Fark_TL"] = balance_summary["Signed_TL_Biz"] + balance_summary["Signed_TL_Onlar"]
-            balance_summary["Net_Fark_FX"] = balance_summary["Signed_FX_Biz"] + balance_summary["Signed_FX_Onlar"]
+                pay_our["match_key"] = create_pay_key(pay_our, map_our, pay_scenario)
+                pay_their["match_key"] = create_pay_key(pay_their, map_their, pay_scenario)
+                
+                pay_our = force_suffix(pay_our, "_Biz", "match_key")
+                pay_their = force_suffix(pay_their, "_Onlar", "match_key")
 
-            st.session_state["res"] = {
-                "inv_match": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
-                "inv_bizde": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].isna()], map_our, map_their, "FATURA"),
-                "inv_onlar": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].isna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
-                "pay_match": format_clean_view(merged_pay, map_our, map_their, "ODEME"),
-                "ignored_our": ignored_our, "ignored_their": ignored_their, "balance_summary": balance_summary
-            }
+                merged_pay = pd.merge(pay_our, pay_their, on="match_key", how="outer")
+                merged_pay["Fark_TL"] = merged_pay["Signed_TL_Biz"].fillna(0) + merged_pay["Signed_TL_Onlar"].fillna(0)
+                merged_pay["Fark_FX"] = merged_pay["Signed_FX_Biz"].fillna(0) + merged_pay["Signed_FX_Onlar"].fillna(0)
+
+                # --- BAKİYE ---
+                our_bal = prep_our.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
+                their_bal = prep_their.groupby("PB_Norm")[["Signed_TL", "Signed_FX"]].sum().reset_index()
+                balance_summary = pd.merge(our_bal, their_bal, on="PB_Norm", how="outer", suffixes=("_Biz", "_Onlar")).fillna(0)
+                balance_summary["Net_Fark_TL"] = balance_summary["Signed_TL_Biz"] + balance_summary["Signed_TL_Onlar"]
+                balance_summary["Net_Fark_FX"] = balance_summary["Signed_FX_Biz"] + balance_summary["Signed_FX_Onlar"]
+
+                st.session_state["res"] = {
+                    "inv_match": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
+                    "inv_bizde": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].notna() & merged_inv["Signed_TL_Onlar"].isna()], map_our, map_their, "FATURA"),
+                    "inv_onlar": format_clean_view(merged_inv[merged_inv["Signed_TL_Biz"].isna() & merged_inv["Signed_TL_Onlar"].notna()], map_our, map_their, "FATURA"),
+                    "pay_match": format_clean_view(merged_pay, map_our, map_their, "ODEME"),
+                    "ignored_our": ignored_our, "ignored_their": ignored_their, "balance_summary": balance_summary
+                }
+        except Exception as e:
+            st.error(f"Bir hata oluştu: {str(e)}")
 
 if "res" in st.session_state:
     res = st.session_state["res"]
