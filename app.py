@@ -376,6 +376,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         if (ec+"_Biz") in df.columns:
             cols_our.append(ec+"_Biz"); rename_our[ec+"_Biz"] = f"{ec} (Biz)"
 
+    # Karşı Taraf
     cols_their, rename_their = [], {}
     if "Kaynak_Dosya_Onlar" in df.columns: cols_their.append("Kaynak_Dosya_Onlar"); rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
 
@@ -437,6 +438,18 @@ if files_our and files_their:
         saved_our = TemplateManager.find_best_match(files_our[0].name)
         saved_their = TemplateManager.find_best_match(files_their[0].name)
         
+        # PREVIEW
+        with st.expander("👀 Yüklenen Dosya Önizlemeleri (İlk 100 Satır)", expanded=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Bizim Taraf")
+                st.dataframe(df_our.head(100))
+                st.caption(f"Toplam Satır: {len(df_our)}")
+            with c2:
+                st.subheader("Karşı Taraf")
+                st.dataframe(df_their.head(100))
+                st.caption(f"Toplam Satır: {len(df_their)}")
+
         c1, c2 = st.columns(2)
         with c1: map_our = render_mapping_ui("Bizim Taraf", df_our, saved_our, "our")
         with c2: map_their = render_mapping_ui("Karşı Taraf", df_their, saved_their, "their")
@@ -479,10 +492,9 @@ if files_our and files_their:
                     grp_our = force_suffix(grp_our, "_Biz", "key_invoice_norm")
                     grp_their = force_suffix(grp_their, "_Onlar", "key_invoice_norm")
                     
-                    # EŞLEŞTİRME (Merge)
                     merged_inv = pd.merge(grp_our, grp_their, on="key_invoice_norm", how="outer")
                     
-                    # FARK (Basit: Biz - Onlar)
+                    # FARK (Biz - Onlar)
                     def simple_diff(r, col_biz, col_onlar):
                         v1 = r[col_biz] if pd.notna(r[col_biz]) else 0
                         v2 = r[col_onlar] if pd.notna(r[col_onlar]) else 0
@@ -517,6 +529,7 @@ if files_our and files_their:
                     pay_their = force_suffix(pay_their, "_Onlar", "match_key")
 
                     merged_pay = pd.merge(pay_our, pay_their, on="match_key", how="outer")
+                    # ÖDEMEDE FARK (BİZ - ONLAR)
                     merged_pay["Fark_TL"] = merged_pay.apply(lambda r: simple_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
                     merged_pay["Fark_FX"] = merged_pay.apply(lambda r: simple_diff(r, "Signed_FX_Biz", "Signed_FX_Onlar"), axis=1)
 
@@ -582,46 +595,51 @@ if "res" in st.session_state:
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            # KEY ERROR FIX: map_our kontrolü
+            # GÜVENLİK KİLİDİ: Veriler yoksa uyar
             if "map_our" not in res:
-                st.warning("Lütfen analizi tekrar çalıştırın.")
+                st.warning("Lütfen analizi tekrar çalıştırın (Sayfayı yenileyin).")
                 st.stop()
 
             t_date = pd.Timestamp(target_date)
-            
-            # --- 1. Filtrele (Tarihe Göre) ---
-            def date_filter(df):
+            # Tarihe göre filtrele (NaT dahil)
+            def filter_date(df):
                 return df[pd.to_datetime(df["std_date"], errors='coerce').le(t_date)]
 
-            o_filt = date_filter(res["prep_our"])
-            t_filt = date_filter(res["prep_their"])
+            o_filt = filter_date(res["prep_our"])
+            t_filt = filter_date(res["prep_their"])
             
             bal_our = o_filt["Signed_TL"].sum()
             bal_their = t_filt["Signed_TL"].sum()
             diff_total = bal_our - bal_their
             
-            # --- 2. Eşleşme Farkları (Tarih Filtreli) ---
+            # --- DETAY HESAPLAMA ---
             m_inv = res["merged_inv"]
-            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"]).le(t_date) | pd.to_datetime(m_inv["std_date_Onlar"]).le(t_date))
+            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"], errors='coerce').le(t_date) | 
+                        pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce').le(t_date))
             match_inv_diff_tl = m_inv[(m_inv["Fark_TL"] != 0) & mask_inv]["Fark_TL"].sum()
             match_inv_diff_fx = m_inv[(m_inv["Fark_FX"] != 0) & mask_inv]["Fark_FX"].sum()
             
             m_pay = res["merged_pay"]
-            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"]).le(t_date) | pd.to_datetime(m_pay["std_date_Onlar"]).le(t_date))
+            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"], errors='coerce').le(t_date) | 
+                        pd.to_datetime(m_pay["std_date_Onlar"], errors='coerce').le(t_date))
             match_pay_diff_tl = m_pay[(m_pay["Fark_TL"] != 0) & mask_pay]["Fark_TL"].sum()
             match_pay_diff_fx = m_pay[(m_pay["Fark_FX"] != 0) & mask_pay]["Fark_FX"].sum()
             
-            # --- 3. Kapsam Dışı Detayı (Doğru Kolon Adı ile) ---
-            def get_ign_sum(df, col_name):
-                df_f = date_filter(df)
-                if df_f.empty or not col_name or col_name not in df_f.columns: return []
+            # KAPSAM DIŞI DETAY (GÜVENLİ KOLON ÇEKİMİ)
+            def get_ign_sum(df, map_cfg):
+                df_f = filter_date(df)
+                if df_f.empty: return []
+                # Kullanıcı hangi kolonu Belge Türü seçtiyse onu al
+                col_name = map_cfg.get("doc_type")
+                if not col_name or col_name not in df_f.columns: return []
+                
                 grp = df_f.groupby(col_name)[["Signed_TL", "Signed_FX"]].sum().reset_index()
                 return [f"{r[col_name]}: {r['Signed_TL']:,.2f} TL / {r['Signed_FX']:,.2f} FX" for _, r in grp.iterrows()]
 
-            ign_list_our = get_ign_sum(res["ignored_our"], res["map_our"].get("doc_type"))
-            ign_list_their = get_ign_sum(res["ignored_their"], res["map_their"].get("doc_type"))
+            ign_list_our = get_ign_sum(res["ignored_our"], res["map_our"])
+            ign_list_their = get_ign_sum(res["ignored_their"], res["map_their"])
             
-            # --- 4. Eksik Belgeler ---
+            # Eksik Belgeler
             d_biz = pd.to_datetime(m_inv["std_date_Biz"], errors='coerce')
             d_onlar = pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce')
             miss_them = m_inv[(m_inv["Signed_TL_Biz"].notna()) & (m_inv["Signed_TL_Onlar"].isna()) & (d_biz.le(t_date))]["Signed_TL_Biz"].sum()
