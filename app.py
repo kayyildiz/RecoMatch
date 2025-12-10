@@ -32,7 +32,6 @@ st.markdown("""
         color: #374151; font-family: 'Segoe UI Mono', monospace;
     }
     .mini-table td:first-child { text-align: left; font-family: sans-serif; font-weight: 600; color: #111827; }
-    
     .pos-val { color: #059669; font-weight: 700; }
     .neg-val { color: #dc2626; font-weight: 700; }
     .neu-val { color: #9ca3af; }
@@ -71,7 +70,7 @@ class TemplateManager:
         return {}
 
 # ==========================================
-# 3. YARDIMCI FONKSİYONLAR (GÜÇLENDİRİLMİŞ)
+# 3. YARDIMCI FONKSİYONLAR
 # ==========================================
 def normalize_text(s):
     if pd.isna(s): return ""
@@ -80,15 +79,19 @@ def normalize_text(s):
     return s
 
 def normalize_currency(val):
-    """TRY, TRL, TL ayrımlarını birleştirir."""
-    if pd.isna(val): return "TL"
+    """
+    Para birimini standartlaştırır.
+    Boş, TRY, TRL -> TL yapar.
+    """
+    if pd.isna(val) or str(val).strip() == "": return "TL"
+    
     s = str(val).strip().upper().replace(" ", "").replace(".", "")
     
     # Eşanlamlılar Sözlüğü
-    if s in ["TRY", "TRL", "TURKLIRASI", "TÜRKLIRASI", "TL"]: return "TL"
-    if s in ["USD", "ABDDOLARI", "USDOLLAR", "DOLAR"]: return "USD"
-    if s in ["EUR", "EURO", "AVRO"]: return "EUR"
-    if s in ["GBP", "STERLIN"]: return "GBP"
+    if s in ["TRY", "TRL", "TURKLIRASI", "TÜRKLIRASI", "TL", "YTL"]: return "TL"
+    if s in ["USD", "ABDDOLARI", "USDOLLAR", "DOLAR", "$"]: return "USD"
+    if s in ["EUR", "EURO", "AVRO", "€"]: return "EUR"
+    if s in ["GBP", "STERLIN", "£"]: return "GBP"
     if s in ["CHF", "ISVICREFRANGI"]: return "CHF"
     return s
 
@@ -102,10 +105,12 @@ def parse_amount(val):
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     s = str(val).strip()
+    # Negatiflik kontrolü (Parantez içi negatif muhasebe formatı dahil)
     is_neg = s.startswith("-") or ("(" in s and ")" in s)
     s = re.sub(r"[^\d.,]", "", s)
     if not s: return 0.0
     try:
+        # TR: 1.000,50 / US: 1,000.50
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
             else: s = s.replace(",", "")
@@ -119,21 +124,16 @@ def read_and_merge(uploaded_files):
     df_list = []
     for f in uploaded_files:
         try:
-            # Dosya uzantısına göre oku
             if f.name.lower().endswith(".csv"):
                 temp_df = pd.read_csv(f, dtype=str)
             else:
                 temp_df = pd.read_excel(f, header=0, dtype=str)
                 
-            # Kolon temizliği
             temp_df.columns = temp_df.columns.astype(str).str.strip()
             temp_df["Satır_No"] = temp_df.index + 2
             
-            # İçerik temizliği (Whitespace)
             for col in temp_df.columns:
-                temp_df[col] = temp_df[col].astype(str).str.strip()
-                # 'nan' stringlerini temizle
-                temp_df[col] = temp_df[col].replace({'nan': '', 'None': ''})
+                temp_df[col] = temp_df[col].astype(str).str.strip().replace({'nan': '', 'None': ''})
                 
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
@@ -235,12 +235,12 @@ def prepare_data(df, mapping, role):
     df["Signed_TL"] = res[0]
     df["Signed_FX"] = res[1]
 
-    # Para Birimi Normalizasyonu
+    # Para Birimi (Eğer kolon seçilmediyse veya boşsa -> TL)
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
         df["PB_Norm"] = df[c_curr].apply(normalize_currency)
-        df["PB_Norm"] = df["PB_Norm"].replace("", "TL").fillna("TL")
-    else: df["PB_Norm"] = "TL"
+    else:
+        df["PB_Norm"] = "TL" # Kolon yoksa komple TL yap
 
     c_inv = mapping.get("inv_no")
     if c_inv and c_inv in df.columns:
@@ -292,7 +292,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     c1, c2, c3 = st.columns(3)
     with c1: c_inv = st.selectbox("Fatura No", cols, index=idx(default_map.get("inv_no")), key=f"{key_prefix}_inv")
     with c2: c_date = st.selectbox("Tarih", cols, index=idx(default_map.get("date")), key=f"{key_prefix}_date")
-    with c3: c_curr = st.selectbox("Para Birimi", cols, index=idx(default_map.get("curr")), key=f"{key_prefix}_curr")
+    with c3: c_curr = st.selectbox("Para Birimi (PB) [Opsiyonel]", cols, index=idx(default_map.get("curr")), key=f"{key_prefix}_curr")
     c_pay = st.selectbox("Ödeme No / Açıklama", cols, index=idx(default_map.get("pay_no")), key=f"{key_prefix}_pay")
 
     st.markdown("---")
@@ -321,7 +321,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 6. GÖRÜNTÜ FORMATLAYICI (EKSİKSİZ VERİ)
+# 6. GÖRÜNTÜ FORMATLAYICI
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
