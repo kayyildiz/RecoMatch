@@ -134,10 +134,12 @@ def read_and_merge(uploaded_files):
                 temp_df = pd.read_excel(f, header=0, dtype=str)
             
             temp_df.columns = temp_df.columns.astype(str).str.strip()
-            temp_df["Satır_No"] = temp_df.index + 2
+            # Orijinal satır numarasını koru (Sıralama için kritik)
+            temp_df["Orj_Row_Idx"] = temp_df.index
             
             for col in temp_df.columns:
-                temp_df[col] = temp_df[col].astype(str).str.strip().replace({'nan': '', 'None': ''})
+                if col != "Orj_Row_Idx":
+                    temp_df[col] = temp_df[col].astype(str).str.strip().replace({'nan': '', 'None': ''})
                 
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
@@ -325,7 +327,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 6. GÖRÜNTÜ FORMATLAYICI
+# 6. GÖRÜNTÜ FORMATLAYICI (GÜVENLİ)
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
@@ -340,7 +342,6 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     
     # Bizim Taraf
     if "Kaynak_Dosya_Biz" in df.columns: cols_our.append("Kaynak_Dosya_Biz"); rename_our["Kaynak_Dosya_Biz"] = "Kaynak (Biz)"
-    if "Satır_No_Biz" in df.columns: cols_our.append("Satır_No_Biz"); rename_our["Satır_No_Biz"] = "Satır (Biz)"
     
     our_inv = map_our.get("inv_no")
     if our_inv and (our_inv + "_Biz") in df.columns:
@@ -365,7 +366,6 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     # Karşı Taraf
     cols_their, rename_their = [], {}
     if "Kaynak_Dosya_Onlar" in df.columns: cols_their.append("Kaynak_Dosya_Onlar"); rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
-    if "Satır_No_Onlar" in df.columns: cols_their.append("Satır_No_Onlar"); rename_their["Satır_No_Onlar"] = "Satır (Onlar)"
 
     their_inv = map_their.get("inv_no")
     if their_inv and (their_inv + "_Onlar") in df.columns:
@@ -391,7 +391,10 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     final_rename = {**rename_our, **rename_their, "Fark_TL": "Fark (TL)", "Fark_FX": "Fark (FX)"}
     
     existing = [c for c in final_cols if c in df.columns]
-    return df[existing].rename(columns=final_rename)
+    out_df = df[existing].rename(columns=final_rename)
+    
+    if out_df.empty: return pd.DataFrame()
+    return out_df
 
 # ==========================================
 # 7. MAIN FLOW
@@ -444,7 +447,7 @@ if files_our and files_their:
                 inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
                 inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
                 
-                # AGGREGATION
+                # FATURA İÇİN AGGREGATION: Tarihi 'max' alıyoruz
                 def build_agg(mapping):
                     agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
                     if mapping.get("inv_no"): agg[mapping["inv_no"]] = "first"
@@ -466,13 +469,13 @@ if files_our and files_their:
                 merged_inv["Fark_TL"] = merged_inv["Signed_TL_Biz"].fillna(0) - merged_inv["Signed_TL_Onlar"].fillna(0)
                 merged_inv["Fark_FX"] = merged_inv["Signed_FX_Biz"].fillna(0) - merged_inv["Signed_FX_Onlar"].fillna(0)
 
-                # --- ÖDEME (GELİŞMİŞ SIRALAMA) ---
+                # --- ÖDEME ---
                 pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
                 pay_their = prep_their[prep_their["Doc_Category"].str.contains("ODEME")].copy()
                 
-                # 1. Önce sırala ki cumcount (sıra no) doğru verilsin
-                pay_our = pay_our.sort_values(by=["std_date", "Signed_TL"])
-                pay_their = pay_their.sort_values(by=["std_date", "Signed_TL"])
+                # ÖDEMELERİ SIRALA (KAYMAYI ÖNLEMEK İÇİN)
+                pay_our = pay_our.sort_values(by=["std_date", "Signed_TL", "Orj_Row_Idx"])
+                pay_their = pay_their.sort_values(by=["std_date", "Signed_TL", "Orj_Row_Idx"])
 
                 def create_pay_key(df, cfg, scenario):
                     d = df["std_date"].dt.strftime('%Y-%m-%d').astype(str)
@@ -483,7 +486,7 @@ if files_our and files_their:
                     else:
                         cat = df["Doc_Category"].astype(str)
                         base_key = d + "_" + cat + "_" + a
-                    
+                    # Cumcount ile sıralı numara ver (1-1, 2-2 eşleşsin diye)
                     df["_temp_rank"] = df.groupby(base_key).cumcount()
                     return base_key + "_" + df["_temp_rank"].astype(str)
 
@@ -558,9 +561,8 @@ if "res" in st.session_state:
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            # Tarih Hatası Düzeltildi
             t_date = pd.Timestamp(target_date)
-            # NaT olanları at, tarihi geçenleri at
+            # NaT olanları ve tarihi uymayanları ele
             o_filt = res["prep_our"][pd.to_datetime(res["prep_our"]["std_date"], errors='coerce').le(t_date)]
             t_filt = res["prep_their"][pd.to_datetime(res["prep_their"]["std_date"], errors='coerce').le(t_date)]
             
@@ -572,18 +574,8 @@ if "res" in st.session_state:
             d_biz = pd.to_datetime(m_inv["std_date_Biz"], errors='coerce')
             d_onlar = pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce')
             
-            # Eksik Faturalar (Tarihe göre)
-            miss_them = m_inv[
-                (m_inv["Signed_TL_Biz"].notna()) & 
-                (m_inv["Signed_TL_Onlar"].isna()) &
-                (d_biz.le(t_date))
-            ]["Signed_TL_Biz"].sum()
-            
-            miss_us = m_inv[
-                (m_inv["Signed_TL_Biz"].isna()) & 
-                (m_inv["Signed_TL_Onlar"].notna()) &
-                (d_onlar.le(t_date))
-            ]["Signed_TL_Onlar"].sum()
+            miss_them = m_inv[(m_inv["Signed_TL_Biz"].notna()) & (m_inv["Signed_TL_Onlar"].isna()) & (d_biz.le(t_date))]["Signed_TL_Biz"].sum()
+            miss_us = m_inv[(m_inv["Signed_TL_Biz"].isna()) & (m_inv["Signed_TL_Onlar"].notna()) & (d_onlar.le(t_date))]["Signed_TL_Onlar"].sum()
 
             st.markdown(f"""
             <div class="commentary-box">
