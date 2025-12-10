@@ -71,7 +71,7 @@ class TemplateManager:
         return {}
 
 # ==========================================
-# 3. YARDIMCI FONKSİYONLAR (NORMALİZASYON)
+# 3. YARDIMCI FONKSİYONLAR (GÜÇLENDİRİLMİŞ)
 # ==========================================
 def normalize_text(s):
     if pd.isna(s): return ""
@@ -80,20 +80,21 @@ def normalize_text(s):
     return s
 
 def normalize_currency(val):
-    """TRY ve TL'yi birleştirir."""
+    """TRY, TRL, TL ayrımlarını birleştirir."""
     if pd.isna(val): return "TL"
-    s = normalize_text(val)
-    # Eşanlamlılar
-    if s in ["TRY", "TRL", "TURK LIRASI", "TURKLIRASI", "TL"]: return "TL"
-    if s in ["USD", "ABD DOLARI", "US DOLLAR", "DOLAR"]: return "USD"
+    s = str(val).strip().upper().replace(" ", "").replace(".", "")
+    
+    # Eşanlamlılar Sözlüğü
+    if s in ["TRY", "TRL", "TURKLIRASI", "TÜRKLIRASI", "TL"]: return "TL"
+    if s in ["USD", "ABDDOLARI", "USDOLLAR", "DOLAR"]: return "USD"
     if s in ["EUR", "EURO", "AVRO"]: return "EUR"
     if s in ["GBP", "STERLIN"]: return "GBP"
+    if s in ["CHF", "ISVICREFRANGI"]: return "CHF"
     return s
 
 def get_invoice_key(raw_val):
-    # Sayı/Metin karışıklığını önlemek için stringe çevir
     val_str = str(raw_val)
-    if val_str.endswith('.0'): val_str = val_str[:-2] # 123.0 -> 123
+    if val_str.endswith('.0'): val_str = val_str[:-2]
     clean = re.sub(r'[^A-Z0-9]', '', normalize_text(val_str))
     return clean
 
@@ -101,11 +102,10 @@ def parse_amount(val):
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     s = str(val).strip()
-    is_neg = s.startswith("-") or ("(" in s and ")" in s) # Muhasebe formatı (100) -> -100
+    is_neg = s.startswith("-") or ("(" in s and ")" in s)
     s = re.sub(r"[^\d.,]", "", s)
     if not s: return 0.0
     try:
-        # TR: 1.000,50 / US: 1,000.50
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
             else: s = s.replace(",", "")
@@ -119,20 +119,28 @@ def read_and_merge(uploaded_files):
     df_list = []
     for f in uploaded_files:
         try:
-            # Header=0 (İlk satır başlık)
-            temp_df = pd.read_excel(f, header=0, dtype=str) # Tümünü string oku (Güvenli)
-            temp_df["Satır_No"] = temp_df.index + 2 
-            # Kolon adlarını temizle
-            temp_df.columns = temp_df.columns.str.strip()
-            # Object verileri temizle
+            # Dosya uzantısına göre oku
+            if f.name.lower().endswith(".csv"):
+                temp_df = pd.read_csv(f, dtype=str)
+            else:
+                temp_df = pd.read_excel(f, header=0, dtype=str)
+                
+            # Kolon temizliği
+            temp_df.columns = temp_df.columns.astype(str).str.strip()
+            temp_df["Satır_No"] = temp_df.index + 2
+            
+            # İçerik temizliği (Whitespace)
             for col in temp_df.columns:
-                temp_df[col] = temp_df[col].str.strip()
+                temp_df[col] = temp_df[col].astype(str).str.strip()
+                # 'nan' stringlerini temizle
+                temp_df[col] = temp_df[col].replace({'nan': '', 'None': ''})
                 
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
         except Exception as e:
             st.error(f"Dosya okuma hatası ({f.name}): {e}")
-    return pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
+    if not df_list: return pd.DataFrame()
+    return pd.concat(df_list, ignore_index=True)
 
 # ==========================================
 # 4. HESAPLAMA MANTIĞI
@@ -202,8 +210,6 @@ def get_doc_category(val, cfg):
 def prepare_data(df, mapping, role):
     if df.empty: return df
     df = df.copy()
-    
-    # Tarih (Excel string okunduğu için datetime'a zorla)
     c_date = mapping.get("date")
     if c_date and c_date in df.columns:
         df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce').dt.date
@@ -229,7 +235,7 @@ def prepare_data(df, mapping, role):
     df["Signed_TL"] = res[0]
     df["Signed_FX"] = res[1]
 
-    # Para Birimi (TRY -> TL)
+    # Para Birimi Normalizasyonu
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
         df["PB_Norm"] = df[c_curr].apply(normalize_currency)
@@ -315,7 +321,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
     }
 
 # ==========================================
-# 6. GÖRÜNTÜ FORMATLAYICI (GÜÇLENDİRİLDİ)
+# 6. GÖRÜNTÜ FORMATLAYICI (EKSİKSİZ VERİ)
 # ==========================================
 def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
@@ -328,7 +334,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     our_inv = map_our.get("inv_no")
     if our_inv and (our_inv + "_Biz") in df.columns:
         cols_our.append(our_inv + "_Biz")
-        rename_our[our_inv + "_Biz"] = "Fatura No (Biz)"
+        rename_our[our_inv + "_Biz"] = "Fatura No (Biz)" if type == "FATURA" else "İlgili Fatura (Biz)"
 
     our_pay = map_our.get("pay_no")
     if type != "FATURA" and our_pay and (our_pay + "_Biz") in df.columns:
@@ -353,7 +359,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     their_inv = map_their.get("inv_no")
     if their_inv and (their_inv + "_Onlar") in df.columns:
         cols_their.append(their_inv + "_Onlar")
-        rename_their[their_inv + "_Onlar"] = "Fatura No (Onlar)"
+        rename_their[their_inv + "_Onlar"] = "Fatura No (Onlar)" if type == "FATURA" else "İlgili Fatura (Onlar)"
 
     their_pay = map_their.get("pay_no")
     if type != "FATURA" and their_pay and (their_pay + "_Onlar") in df.columns:
@@ -373,14 +379,8 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     final_cols = cols_our + cols_their + ["Fark_TL", "Fark_FX"]
     final_rename = {**rename_our, **rename_their, "Fark_TL": "Fark (TL)", "Fark_FX": "Fark (FX)"}
     
-    # Eksik kolonları atla (Hata önleyici)
     existing = [c for c in final_cols if c in df.columns]
-    
-    # Arrow compatibility için object'leri string yap
-    out_df = df[existing].rename(columns=final_rename)
-    for c in out_df.columns:
-        if out_df[c].dtype == 'object': out_df[c] = out_df[c].astype(str)
-    return out_df
+    return df[existing].rename(columns=final_rename)
 
 # ==========================================
 # 7. MAIN FLOW
