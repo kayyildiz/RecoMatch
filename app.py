@@ -32,6 +32,7 @@ st.markdown("""
         color: #374151; font-family: 'Segoe UI Mono', monospace;
     }
     .mini-table td:first-child { text-align: left; font-family: sans-serif; font-weight: 600; color: #111827; }
+    
     .pos-val { color: #059669; font-weight: 700; }
     .neg-val { color: #dc2626; font-weight: 700; }
     .neu-val { color: #9ca3af; }
@@ -85,6 +86,7 @@ def normalize_currency(val):
     if s in ["USD", "ABDDOLARI", "USDOLLAR", "DOLAR", "$"]: return "USD"
     if s in ["EUR", "EURO", "AVRO", "€"]: return "EUR"
     if s in ["GBP", "STERLIN", "£"]: return "GBP"
+    if s in ["CHF", "ISVICREFRANGI"]: return "CHF"
     return s
 
 def get_invoice_key(raw_val):
@@ -94,17 +96,29 @@ def get_invoice_key(raw_val):
     return clean
 
 def parse_amount(val):
+    """
+    Sayısal değerleri parse eder.
+    (100.00) parantez formatını ve -100 formatını destekler.
+    """
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
+    
     s = str(val).strip()
+    # Negatiflik kontrolü
     is_neg = s.startswith("-") or ("(" in s and ")" in s)
+    
+    # Sadece rakam, nokta ve virgülü bırak
     s = re.sub(r"[^\d.,]", "", s)
     if not s: return 0.0
+    
     try:
+        # 1.000,50 (TR) vs 1,000.50 (US)
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
             else: s = s.replace(",", "")
-        elif "," in s: s = s.replace(",", ".")
+        elif "," in s: 
+            s = s.replace(",", ".")
+            
         f = float(s)
         return -f if is_neg else f
     except: return 0.0
@@ -118,11 +132,13 @@ def read_and_merge(uploaded_files):
                 temp_df = pd.read_csv(f, dtype=str)
             else:
                 temp_df = pd.read_excel(f, header=0, dtype=str)
-            
-            temp_df.columns = temp_df.columns.str.strip()
+                
+            temp_df.columns = temp_df.columns.astype(str).str.strip()
             temp_df["Satır_No"] = temp_df.index + 2
+            
             for col in temp_df.columns:
                 temp_df[col] = temp_df[col].astype(str).str.strip().replace({'nan': '', 'None': ''})
+                
             temp_df["Kaynak_Dosya"] = f.name
             df_list.append(temp_df)
         except Exception as e:
@@ -131,13 +147,14 @@ def read_and_merge(uploaded_files):
     return pd.concat(df_list, ignore_index=True)
 
 # ==========================================
-# 4. GÜVENLİ HESAPLAMA MANTIĞI
+# 4. HESAPLAMA MANTIĞI
 # ==========================================
 def calculate_smart_balance(row, role, 
                             mode_tl, c_tl_debt, c_tl_credit, c_tl_single, is_tl_signed,
                             mode_fx, c_fx_debt, c_fx_credit, c_fx_single, is_fx_signed,
                             doc_cat):
     
+    # 1. Varsayılan İşaret (Otomatik)
     calc_sign = 1
     if role == "Biz Alıcı":
         if doc_cat in ["FATURA", "IADE_ODEME"]: calc_sign = 1 
@@ -151,42 +168,44 @@ def calculate_smart_balance(row, role,
     tl_credit_val = 0.0
     tl_net = 0.0
     
-    # Hata önlemi: Kolonlar row içinde var mı?
     if mode_tl == "separate":
-        if c_tl_debt in row: tl_debt_val = parse_amount(row[c_tl_debt])
-        if c_tl_credit in row: tl_credit_val = parse_amount(row[c_tl_credit])
+        # Ayrı kolonlarda (Alacak - Borç) her zaman doğru sonucu verir
+        tl_debt_val = parse_amount(row.get(c_tl_debt, 0))
+        tl_credit_val = parse_amount(row.get(c_tl_credit, 0))
         tl_net = tl_credit_val - tl_debt_val
     else:
-        if c_tl_single in row:
-            raw_tl = parse_amount(row[c_tl_single])
-            if is_tl_signed: tl_net = raw_tl
-            else: tl_net = raw_tl * calc_sign
+        # Tek kolon
+        raw_tl = parse_amount(row.get(c_tl_single, 0))
+        if is_tl_signed: 
+            # Kullanıcı "Zaten İşaretli" dediyse olduğu gibi al
+            tl_net = raw_tl
+        else:
+            # Yoksa belge türüne göre çarp
+            tl_net = raw_tl * calc_sign
 
     # --- FX ---
     fx_net = 0.0
     if mode_fx == "separate":
-        if c_fx_debt in row: f_d = parse_amount(row[c_fx_debt])
-        else: f_d = 0
-        if c_fx_credit in row: f_c = parse_amount(row[c_fx_credit])
-        else: f_c = 0
+        f_d = parse_amount(row.get(c_fx_debt, 0))
+        f_c = parse_amount(row.get(c_fx_credit, 0))
         fx_net = f_c - f_d
     elif mode_fx == "single":
-        if c_fx_single in row:
-            raw_fx = parse_amount(row[c_fx_single])
-            if raw_fx != 0:
-                if is_fx_signed:
-                    fx_net = raw_fx
+        raw_fx = parse_amount(row.get(c_fx_single, 0))
+        if raw_fx != 0:
+            if is_fx_signed:
+                fx_net = raw_fx
+            else:
+                # Akıllı Yön Tespiti (TL'ye bak)
+                if mode_tl == "separate":
+                    if tl_debt_val > 0: fx_net = -abs(raw_fx)
+                    elif tl_credit_val > 0: fx_net = abs(raw_fx)
+                    else: fx_net = raw_fx * calc_sign
+                elif mode_tl == "single" and is_tl_signed:
+                    if tl_net < 0: fx_net = -abs(raw_fx)
+                    elif tl_net > 0: fx_net = abs(raw_fx)
+                    else: fx_net = raw_fx * calc_sign
                 else:
-                    if mode_tl == "separate":
-                        if tl_debt_val > 0: fx_net = -abs(raw_fx)
-                        elif tl_credit_val > 0: fx_net = abs(raw_fx)
-                        else: fx_net = raw_fx * calc_sign
-                    elif mode_tl == "single" and is_tl_signed:
-                        if tl_net < 0: fx_net = -abs(raw_fx)
-                        elif tl_net > 0: fx_net = abs(raw_fx)
-                        else: fx_net = raw_fx * calc_sign
-                    else:
-                        fx_net = raw_fx * calc_sign
+                    fx_net = raw_fx * calc_sign
 
     return tl_net, fx_net
 
@@ -201,16 +220,6 @@ def get_doc_category(val, cfg):
 def prepare_data(df, mapping, role):
     if df.empty: return df
     df = df.copy()
-    
-    # Validation: Zorunlu kolonlar var mı?
-    req_cols = []
-    if mapping.get("inv_no"): req_cols.append(mapping["inv_no"])
-    
-    missing = [c for c in req_cols if c not in df.columns]
-    if missing:
-        st.error(f"HATA: Şu kolonlar dosyada bulunamadı: {missing}. Lütfen seçimleri kontrol edin.")
-        return pd.DataFrame()
-
     c_date = mapping.get("date")
     if c_date and c_date in df.columns:
         df["std_date"] = pd.to_datetime(df[c_date], dayfirst=True, errors='coerce').dt.date
@@ -236,11 +245,12 @@ def prepare_data(df, mapping, role):
     df["Signed_TL"] = res[0]
     df["Signed_FX"] = res[1]
 
+    # Para Birimi
     c_curr = mapping.get("curr")
     if c_curr and c_curr in df.columns:
         df["PB_Norm"] = df[c_curr].apply(normalize_currency)
-        df["PB_Norm"] = df["PB_Norm"].replace("", "TL").fillna("TL")
-    else: df["PB_Norm"] = "TL"
+    else:
+        df["PB_Norm"] = "TL"
 
     c_inv = mapping.get("inv_no")
     if c_inv and c_inv in df.columns:
@@ -249,7 +259,7 @@ def prepare_data(df, mapping, role):
     return df
 
 # ==========================================
-# 5. UI & MAPPING (GÜVENLİ INDEX)
+# 5. UI & MAPPING
 # ==========================================
 def safe_idx(cols, val):
     if val in cols: return cols.index(val)
@@ -313,7 +323,7 @@ def render_mapping_ui(title, df, default_map, key_prefix):
                 sel_types["ODEME"] = st.multiselect("Ödemeler", vals, default=[x for x in d_t.get("ODEME", []) if x in vals], key=f"{key_prefix}_mo")
                 sel_types["IADE_ODEME"] = st.multiselect("İade Ödemeler", vals, default=[x for x in d_t.get("IADE_ODEME", []) if x in vals], key=f"{key_prefix}_mio")
 
-    extra = st.multiselect("İlave Kolonlar", [c for c in cols if c != "Seçiniz..."], default=[x for x in default_map.get("extra_cols", []) if x in cols], key=f"{key_prefix}_extra")
+    extra = st.multiselect("İlave Kolonlar", [c for c in cols if c != "Seçiniz..."], default=default_map.get("extra_cols", []), key=f"{key_prefix}_extra")
 
     def cln(v): return None if v == "Seçiniz..." else v
     return {
@@ -330,6 +340,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     if df.empty: return df
     cols_our, rename_our = [], {}
     
+    # Bizim Taraf
     if "Kaynak_Dosya_Biz" in df.columns: cols_our.append("Kaynak_Dosya_Biz"); rename_our["Kaynak_Dosya_Biz"] = "Kaynak (Biz)"
     if "Satır_No_Biz" in df.columns: cols_our.append("Satır_No_Biz"); rename_our["Satır_No_Biz"] = "Satır (Biz)"
     
@@ -353,6 +364,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         if (ec+"_Biz") in df.columns:
             cols_our.append(ec+"_Biz"); rename_our[ec+"_Biz"] = f"{ec} (Biz)"
 
+    # Karşı Taraf
     cols_their, rename_their = [], {}
     if "Kaynak_Dosya_Onlar" in df.columns: cols_their.append("Kaynak_Dosya_Onlar"); rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
     if "Satır_No_Onlar" in df.columns: cols_their.append("Satır_No_Onlar"); rename_their["Satır_No_Onlar"] = "Satır (Onlar)"
@@ -383,7 +395,6 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
     existing = [c for c in final_cols if c in df.columns]
     out_df = df[existing].rename(columns=final_rename)
     
-    # Hata önlemi: Boş dataframe dönmemek için
     if out_df.empty: return pd.DataFrame()
     return out_df
 
@@ -430,11 +441,6 @@ if files_our and files_their:
                 prep_our = prepare_data(df_our, map_our, role)
                 role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
                 prep_their = prepare_data(df_their, map_their, role_their)
-                
-                # prepare_data boş dönerse dur
-                if prep_our.empty or prep_their.empty:
-                    st.error("Veri hazırlanamadı. Lütfen kolon seçimlerinizi kontrol edin.")
-                    st.stop()
 
                 ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
                 ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
@@ -505,7 +511,7 @@ if files_our and files_their:
                     "ignored_our": ignored_our, "ignored_their": ignored_their, "balance_summary": balance_summary
                 }
         except Exception as e:
-            st.error(f"Beklenmedik bir hata oluştu: {str(e)}")
+            st.error(f"Bir hata oluştu: {str(e)}")
 
 if "res" in st.session_state:
     res = st.session_state["res"]
@@ -535,10 +541,11 @@ if "res" in st.session_state:
     """, unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✅ Fatura Eşleşme", "⚠️ Bizde Var/Yok", "⚠️ Onlarda Var/Yok", "💳 Ödemeler", "🔍 Analiz Dışı", "📥 İndir"])
-    with tab1: st.data_editor(res["inv_match"], use_container_width=True, disabled=True)
-    with tab2: st.data_editor(res["inv_bizde"], use_container_width=True, disabled=True)
-    with tab3: st.data_editor(res["inv_onlar"], use_container_width=True, disabled=True)
-    with tab4: st.data_editor(res["pay_match"], use_container_width=True, disabled=True)
+    # ID KEYLERİ EKLENDİ
+    with tab1: st.data_editor(res["inv_match"], use_container_width=True, disabled=True, key="editor_match")
+    with tab2: st.data_editor(res["inv_bizde"], use_container_width=True, disabled=True, key="editor_bizde")
+    with tab3: st.data_editor(res["inv_onlar"], use_container_width=True, disabled=True, key="editor_onlar")
+    with tab4: st.data_editor(res["pay_match"], use_container_width=True, disabled=True, key="editor_pay")
     with tab5: 
         c1,c2=st.columns(2)
         with c1: st.write("Bizim Kapsam Dışı"); st.dataframe(res["ignored_our"])
