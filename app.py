@@ -8,7 +8,7 @@ from io import BytesIO
 from datetime import date
 
 # ==========================================
-# 1. AYARLAR & CSS
+# 1. AYARLAR & CSS (GÖRSEL DÜZELTMELER)
 # ==========================================
 st.set_page_config(page_title="RecoMatch", layout="wide", page_icon="🛡️")
 
@@ -18,27 +18,69 @@ st.markdown("""
     .stDataFrame {border: 1px solid #dee2e6; border-radius: 4px;}
     div[data-testid="stExpander"] {background: white; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);}
     
+    /* LOGO STİLİ */
+    .logo-text {
+        font-size: 32px !important;
+        font-weight: 900 !important;
+        color: #1e3a8a !important;
+        margin-bottom: 20px !important;
+        display: block;
+    }
+
+    /* TABLO STİLİ (SABİT GENİŞLİK & HİZALAMA) */
     .mini-table {
-        width: 100%; border-collapse: collapse; font-size: 0.85rem; 
-        background: white; border-radius: 8px; overflow: hidden; 
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-bottom: 1rem;
+        width: 100%; 
+        border-collapse: collapse; 
+        font-size: 0.85rem; 
+        background: white; 
+        border-radius: 8px; 
+        overflow: hidden; 
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05); 
+        margin-bottom: 1rem;
+        table-layout: fixed; /* Sütunları sabitler, kaymayı önler */
     }
+    
     .mini-table th {
-        background: #1e3a8a; color: white; text-align: right; 
-        padding: 10px 8px; font-weight: 600; white-space: nowrap;
+        background: #1e3a8a; 
+        color: white; 
+        text-align: right; 
+        padding: 12px 8px; 
+        font-weight: 600; 
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
-    .mini-table th:first-child { text-align: left; }
+    
+    .mini-table th:first-child { 
+        text-align: left; 
+        width: 8%; /* Para Birimi kolonu dar */
+    }
+    
     .mini-table td {
-        padding: 8px 8px; text-align: right; border-bottom: 1px solid #f3f4f6;
-        color: #374151; font-family: 'Segoe UI Mono', monospace;
+        padding: 10px 8px; 
+        text-align: right; 
+        border-bottom: 1px solid #f3f4f6;
+        color: #374151; 
+        font-family: 'Segoe UI Mono', 'Consolas', monospace; /* Sayılar için hizalı font */
+        vertical-align: middle;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
-    .mini-table td:first-child { text-align: left; font-family: sans-serif; font-weight: 600; color: #111827; }
+    
+    .mini-table td:first-child { 
+        text-align: left; 
+        font-family: sans-serif; 
+        font-weight: 700; 
+        color: #111827; 
+    }
     
     .pos-val { color: #059669; font-weight: 700; }
     .neg-val { color: #dc2626; font-weight: 700; }
     .neu-val { color: #9ca3af; }
-    .border-left-thick { border-left: 2px solid #e5e7eb; }
+    .border-left-thick { border-left: 2px solid #cbd5e1; }
     
+    /* Yorum Kutusu */
     .commentary-box {
         background-color: #ffffff; border: 1px solid #e2e8f0; 
         border-radius: 8px; padding: 25px; margin-top: 20px;
@@ -49,7 +91,7 @@ st.markdown("""
     .highlight-blue { color: #2563eb; font-weight: bold; background-color: #eff6ff; padding: 2px 6px; border-radius: 4px; }
     .highlight-red { color: #dc2626; font-weight: bold; background-color: #fef2f2; padding: 2px 6px; border-radius: 4px; }
     .list-item { margin-bottom: 8px; margin-left: 20px; font-size: 0.95rem; }
-    .sub-list { margin-left: 40px; font-size: 0.9rem; color: #64748b; list-style-type: circle; }
+    .sub-list { margin-left: 40px; font-size: 0.9rem; color: #64748b; list-style-type: circle; margin-bottom: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -225,7 +267,6 @@ def get_doc_category(val, cfg):
     elif val in [normalize_text(x) for x in cfg.get("ODEME", [])]: return "ODEME"
     elif val in [normalize_text(x) for x in cfg.get("IADE_FATURA", [])]: return "IADE_FATURA"
     elif val in [normalize_text(x) for x in cfg.get("IADE_ODEME", [])]: return "IADE_ODEME"
-    # YENİ: AÇILIŞ FİŞİ KONTROLÜ
     if val in [normalize_text(x) for x in cfg.get("ACILIS", [])]: return "ACILIS"
     return "DIGER"
 
@@ -321,7 +362,6 @@ def render_mapping_ui(title, df, default_map, key_prefix):
 
     st.markdown("---")
     c_type = st.selectbox("Belge Türü", cols, index=safe_idx(cols, default_map.get("doc_type")), key=f"{key_prefix}_type")
-    # YENİ: ACILIS EKLENDİ
     sel_types = {"FATURA": [], "IADE_FATURA": [], "ODEME": [], "IADE_ODEME": [], "ACILIS": []}
     if c_type != "Seçiniz...":
         vals = sorted([str(x) for x in df[c_type].unique() if pd.notna(x)])
@@ -331,7 +371,6 @@ def render_mapping_ui(title, df, default_map, key_prefix):
             with c_f:
                 sel_types["FATURA"] = st.multiselect("Faturalar", vals, default=[x for x in d_t.get("FATURA", []) if x in vals], key=f"{key_prefix}_mf")
                 sel_types["IADE_FATURA"] = st.multiselect("İade Faturalar", vals, default=[x for x in d_t.get("IADE_FATURA", []) if x in vals], key=f"{key_prefix}_mif")
-                # YENİ
                 st.caption("---")
                 sel_types["ACILIS"] = st.multiselect("Açılış/Devir Fişi", vals, default=[x for x in d_t.get("ACILIS", []) if x in vals], key=f"{key_prefix}_mac")
             with c_o:
@@ -382,7 +421,6 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         if (ec+"_Biz") in df.columns:
             cols_our.append(ec+"_Biz"); rename_our[ec+"_Biz"] = f"{ec} (Biz)"
 
-    # Karşı Taraf
     cols_their, rename_their = [], {}
     if "Kaynak_Dosya_Onlar" in df.columns: cols_their.append("Kaynak_Dosya_Onlar"); rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
 
@@ -425,14 +463,16 @@ def force_suffix(df, suffix, key_col):
     return df.rename(columns=new_cols)
 
 with st.sidebar:
-    st.header("RecoMatch 🛡️")
+    # --- LOGO (BÜYÜK) ---
+    st.markdown('<div class="logo-text">RecoMatch 🛡️</div>', unsafe_allow_html=True)
+    
     role = st.selectbox("Bizim Rolümüz", ["Biz Alıcı", "Biz Satıcı"])
     st.divider()
     
-    # DEVİR BAKİYESİ SEÇENEĞİ
+    # DEVİR
     calc_opening = st.checkbox("Geçmiş Dönem Bakiyesini (Devir) Hesapla", value=True)
     if calc_opening:
-        opening_date = st.date_input("Analiz Başlangıç Tarihi (Bu tarihten öncekiler Devir olur)", value=date(date.today().year, 1, 1))
+        opening_date = st.date_input("Analiz Başlangıç Tarihi", value=date(date.today().year, 1, 1))
 
     st.divider()
     files_our = st.file_uploader("Bizim Ekstreler", accept_multiple_files=True)
@@ -451,6 +491,15 @@ if files_our and files_their:
         saved_our = TemplateManager.find_best_match(files_our[0].name)
         saved_their = TemplateManager.find_best_match(files_their[0].name)
         
+        # PREVIEW (AYRI PENCERELER)
+        c1, c2 = st.columns(2)
+        with c1:
+            with st.expander("👀 Bizim Taraf Önizleme", expanded=False):
+                st.dataframe(df_our.head(50), use_container_width=True)
+        with c2:
+            with st.expander("👀 Karşı Taraf Önizleme", expanded=False):
+                st.dataframe(df_their.head(50), use_container_width=True)
+
         c1, c2 = st.columns(2)
         with c1: map_our = render_mapping_ui("Bizim Taraf", df_our, saved_our, "our")
         with c2: map_their = render_mapping_ui("Karşı Taraf", df_their, saved_their, "their")
@@ -469,39 +518,30 @@ if files_our and files_their:
                     role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
                     prep_their = prepare_data(df_their, map_their, role_their)
                     
-                    # --- DEVİR MANTIĞI: ID EŞİTLEME ---
-                    # 1. Bizim Sanal Satır
+                    # --- DEVİR MANTIĞI ---
                     if calc_opening:
                         t_open = pd.Timestamp(opening_date)
                         mask_open_our = pd.to_datetime(prep_our["std_date"], errors='coerce').lt(t_open)
                         if mask_open_our.any():
-                            # Sadece DIGER, ODEME ve FATURA olanları topla (ACILIS hariç, o zaten varsa)
-                            # Basitlik için tümünü topluyoruz
                             open_bal_tl = prep_our.loc[mask_open_our, "Signed_TL"].sum()
                             open_bal_fx = prep_our.loc[mask_open_our, "Signed_FX"].sum()
                             prep_our = prep_our[~mask_open_our].copy()
                             
                             new_row = pd.DataFrame([{
-                                "Doc_Category": "ACILIS", # Özel kategori
+                                "Doc_Category": "ACILIS", 
                                 "Signed_TL": open_bal_tl,
                                 "Signed_FX": open_bal_fx,
                                 "std_date": t_open,
                                 "PB_Norm": "TL", 
                                 "Kaynak_Dosya": "DEVİR_BAKİYESİ",
-                                map_our["inv_no"]: "__ACILIS__" # ID SABİTLEME
+                                map_our["inv_no"]: "__ACILIS__"
                             }])
                             prep_our = pd.concat([new_row, prep_our], ignore_index=True)
-                            # Key oluştururken bu ID'yi koru
-                            # (Aşağıda get_invoice_key bunu bozabilir, o yüzden manuel düzeltme gerekebilir)
                     
-                    # 2. Karşı Tarafın Açılış Fişi ID'sini Değiştir
-                    # Eğer kullanıcı "Açılış Fişi" türü seçtiyse
                     if "ACILIS" in prep_their["Doc_Category"].unique():
                          prep_their.loc[prep_their["Doc_Category"]=="ACILIS", map_their["inv_no"]] = "__ACILIS__"
                     
-                    # Key Yenileme
                     prep_our["key_invoice_norm"] = prep_our[map_our["inv_no"]].apply(get_invoice_key)
-                    # Özel ID __ACILIS__ normalizasyondan bozulmasın
                     prep_our.loc[prep_our[map_our["inv_no"]] == "__ACILIS__", "key_invoice_norm"] = "__ACILIS__"
 
                     prep_their["key_invoice_norm"] = prep_their[map_their["inv_no"]].apply(get_invoice_key)
@@ -510,8 +550,7 @@ if files_our and files_their:
                     ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
                     ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
 
-                    # --- EŞLEŞTİRME (ACILIS Dahil) ---
-                    # ACILIS kategorisini de Fatura gibi eşleşmeye dahil et
+                    # --- EŞLEŞTİRME ---
                     inv_our = prep_our[prep_our["Doc_Category"].isin(["FATURA", "ACILIS"])]
                     inv_their = prep_their[prep_their["Doc_Category"].isin(["FATURA", "ACILIS"])]
                     
@@ -634,7 +673,6 @@ if "res" in st.session_state:
         target_date = st.date_input("Hangi tarih itibariyle analiz yapılsın?", value=date.today())
         
         if st.button("Yorumla"):
-            # KEY ERROR FIX
             if "map_our" not in res:
                 st.warning("Lütfen analizi tekrar çalıştırın.")
                 st.stop()
@@ -649,7 +687,9 @@ if "res" in st.session_state:
             
             bal_our = o_filt["Signed_TL"].sum()
             bal_their = t_filt["Signed_TL"].sum()
-            diff_total = bal_our - bal_their if (bal_our*bal_their > 0) else bal_our + bal_their
+            
+            # Akıllı Fark
+            diff_total = bal_our - bal_their if (bal_our > 0 and bal_their > 0) or (bal_our < 0 and bal_their < 0) else bal_our + bal_their
             
             # --- DETAY HESAPLAMA ---
             m_inv = res["merged_inv"]
@@ -658,8 +698,7 @@ if "res" in st.session_state:
             match_inv_diff_tl = m_inv[(m_inv["Fark_TL"] != 0) & mask_inv]["Fark_TL"].sum()
             match_inv_diff_fx = m_inv[(m_inv["Fark_FX"] != 0) & mask_inv]["Fark_FX"].sum()
             
-            # AÇILIŞ FARKI (YENİ)
-            # key_invoice_norm == "__ACILIS__" olan satırı bul
+            # AÇILIŞ FARKI
             open_diff_tl = m_inv.loc[m_inv["key_invoice_norm"] == "__ACILIS__", "Fark_TL"].sum()
 
             m_pay = res["merged_pay"]
