@@ -225,6 +225,8 @@ def get_doc_category(val, cfg):
     elif val in [normalize_text(x) for x in cfg.get("ODEME", [])]: return "ODEME"
     elif val in [normalize_text(x) for x in cfg.get("IADE_FATURA", [])]: return "IADE_FATURA"
     elif val in [normalize_text(x) for x in cfg.get("IADE_ODEME", [])]: return "IADE_ODEME"
+    # YENİ: AÇILIŞ FİŞİ KONTROLÜ
+    if val in [normalize_text(x) for x in cfg.get("ACILIS", [])]: return "ACILIS"
     return "DIGER"
 
 def prepare_data(df, mapping, role):
@@ -319,7 +321,8 @@ def render_mapping_ui(title, df, default_map, key_prefix):
 
     st.markdown("---")
     c_type = st.selectbox("Belge Türü", cols, index=safe_idx(cols, default_map.get("doc_type")), key=f"{key_prefix}_type")
-    sel_types = {"FATURA": [], "IADE_FATURA": [], "ODEME": [], "IADE_ODEME": []}
+    # YENİ: ACILIS EKLENDİ
+    sel_types = {"FATURA": [], "IADE_FATURA": [], "ODEME": [], "IADE_ODEME": [], "ACILIS": []}
     if c_type != "Seçiniz...":
         vals = sorted([str(x) for x in df[c_type].unique() if pd.notna(x)])
         d_t = default_map.get("type_vals", {})
@@ -328,6 +331,9 @@ def render_mapping_ui(title, df, default_map, key_prefix):
             with c_f:
                 sel_types["FATURA"] = st.multiselect("Faturalar", vals, default=[x for x in d_t.get("FATURA", []) if x in vals], key=f"{key_prefix}_mf")
                 sel_types["IADE_FATURA"] = st.multiselect("İade Faturalar", vals, default=[x for x in d_t.get("IADE_FATURA", []) if x in vals], key=f"{key_prefix}_mif")
+                # YENİ
+                st.caption("---")
+                sel_types["ACILIS"] = st.multiselect("Açılış/Devir Fişi", vals, default=[x for x in d_t.get("ACILIS", []) if x in vals], key=f"{key_prefix}_mac")
             with c_o:
                 sel_types["ODEME"] = st.multiselect("Ödemeler", vals, default=[x for x in d_t.get("ODEME", []) if x in vals], key=f"{key_prefix}_mo")
                 sel_types["IADE_ODEME"] = st.multiselect("İade Ödemeler", vals, default=[x for x in d_t.get("IADE_ODEME", []) if x in vals], key=f"{key_prefix}_mio")
@@ -376,6 +382,7 @@ def format_clean_view(df, map_our, map_their, type="FATURA"):
         if (ec+"_Biz") in df.columns:
             cols_our.append(ec+"_Biz"); rename_our[ec+"_Biz"] = f"{ec} (Biz)"
 
+    # Karşı Taraf
     cols_their, rename_their = [], {}
     if "Kaynak_Dosya_Onlar" in df.columns: cols_their.append("Kaynak_Dosya_Onlar"); rename_their["Kaynak_Dosya_Onlar"] = "Kaynak (Onlar)"
 
@@ -422,10 +429,10 @@ with st.sidebar:
     role = st.selectbox("Bizim Rolümüz", ["Biz Alıcı", "Biz Satıcı"])
     st.divider()
     
-    # DEVİR BAKİYESİ SEÇENEĞİ (YENİ)
+    # DEVİR BAKİYESİ SEÇENEĞİ
     calc_opening = st.checkbox("Geçmiş Dönem Bakiyesini (Devir) Hesapla", value=True)
     if calc_opening:
-        opening_date = st.date_input("Analiz Başlangıç Tarihi (Bu tarihten öncekiler Devir Bakiyesi olur)", value=date(date.today().year, 1, 1))
+        opening_date = st.date_input("Analiz Başlangıç Tarihi (Bu tarihten öncekiler Devir olur)", value=date(date.today().year, 1, 1))
 
     st.divider()
     files_our = st.file_uploader("Bizim Ekstreler", accept_multiple_files=True)
@@ -462,37 +469,51 @@ if files_our and files_their:
                     role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
                     prep_their = prepare_data(df_their, map_their, role_their)
                     
-                    # --- DEVİR BAKİYESİ MANTIĞI (YENİ) ---
+                    # --- DEVİR MANTIĞI: ID EŞİTLEME ---
+                    # 1. Bizim Sanal Satır
                     if calc_opening:
                         t_open = pd.Timestamp(opening_date)
-                        
-                        # Bizim Taraf: Tarihten öncekileri topla, tek satır yap
                         mask_open_our = pd.to_datetime(prep_our["std_date"], errors='coerce').lt(t_open)
                         if mask_open_our.any():
+                            # Sadece DIGER, ODEME ve FATURA olanları topla (ACILIS hariç, o zaten varsa)
+                            # Basitlik için tümünü topluyoruz
                             open_bal_tl = prep_our.loc[mask_open_our, "Signed_TL"].sum()
                             open_bal_fx = prep_our.loc[mask_open_our, "Signed_FX"].sum()
-                            
-                            # Eski kayıtları sil
                             prep_our = prep_our[~mask_open_our].copy()
                             
-                            # Yeni Devir Satırı Ekle
                             new_row = pd.DataFrame([{
-                                "Doc_Category": "DIGER", # Eşleşmeye girmesin, sadece bakiye
+                                "Doc_Category": "ACILIS", # Özel kategori
                                 "Signed_TL": open_bal_tl,
                                 "Signed_FX": open_bal_fx,
                                 "std_date": t_open,
-                                "PB_Norm": "TL", # Varsayılan
+                                "PB_Norm": "TL", 
                                 "Kaynak_Dosya": "DEVİR_BAKİYESİ",
-                                map_our["inv_no"]: "AÇILIŞ/DEVİR"
+                                map_our["inv_no"]: "__ACILIS__" # ID SABİTLEME
                             }])
                             prep_our = pd.concat([new_row, prep_our], ignore_index=True)
+                            # Key oluştururken bu ID'yi koru
+                            # (Aşağıda get_invoice_key bunu bozabilir, o yüzden manuel düzeltme gerekebilir)
+                    
+                    # 2. Karşı Tarafın Açılış Fişi ID'sini Değiştir
+                    # Eğer kullanıcı "Açılış Fişi" türü seçtiyse
+                    if "ACILIS" in prep_their["Doc_Category"].unique():
+                         prep_their.loc[prep_their["Doc_Category"]=="ACILIS", map_their["inv_no"]] = "__ACILIS__"
+                    
+                    # Key Yenileme
+                    prep_our["key_invoice_norm"] = prep_our[map_our["inv_no"]].apply(get_invoice_key)
+                    # Özel ID __ACILIS__ normalizasyondan bozulmasın
+                    prep_our.loc[prep_our[map_our["inv_no"]] == "__ACILIS__", "key_invoice_norm"] = "__ACILIS__"
+
+                    prep_their["key_invoice_norm"] = prep_their[map_their["inv_no"]].apply(get_invoice_key)
+                    prep_their.loc[prep_their[map_their["inv_no"]] == "__ACILIS__", "key_invoice_norm"] = "__ACILIS__"
 
                     ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
                     ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
 
-                    # --- EŞLEŞTİRME ---
-                    inv_our = prep_our[prep_our["Doc_Category"].str.contains("FATURA")]
-                    inv_their = prep_their[prep_their["Doc_Category"].str.contains("FATURA")]
+                    # --- EŞLEŞTİRME (ACILIS Dahil) ---
+                    # ACILIS kategorisini de Fatura gibi eşleşmeye dahil et
+                    inv_our = prep_our[prep_our["Doc_Category"].isin(["FATURA", "ACILIS"])]
+                    inv_their = prep_their[prep_their["Doc_Category"].isin(["FATURA", "ACILIS"])]
                     
                     def build_agg(mapping):
                         agg = {"Signed_TL": "sum", "Signed_FX": "sum", "std_date": "max", "Kaynak_Dosya": "first", "Satır_No": "first"}
@@ -632,12 +653,18 @@ if "res" in st.session_state:
             
             # --- DETAY HESAPLAMA ---
             m_inv = res["merged_inv"]
-            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"]).le(t_date) | pd.to_datetime(m_inv["std_date_Onlar"]).le(t_date))
+            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"], errors='coerce').le(t_date) | 
+                        pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce').le(t_date))
             match_inv_diff_tl = m_inv[(m_inv["Fark_TL"] != 0) & mask_inv]["Fark_TL"].sum()
             match_inv_diff_fx = m_inv[(m_inv["Fark_FX"] != 0) & mask_inv]["Fark_FX"].sum()
             
+            # AÇILIŞ FARKI (YENİ)
+            # key_invoice_norm == "__ACILIS__" olan satırı bul
+            open_diff_tl = m_inv.loc[m_inv["key_invoice_norm"] == "__ACILIS__", "Fark_TL"].sum()
+
             m_pay = res["merged_pay"]
-            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"]).le(t_date) | pd.to_datetime(m_pay["std_date_Onlar"]).le(t_date))
+            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"], errors='coerce').le(t_date) | 
+                        pd.to_datetime(m_pay["std_date_Onlar"], errors='coerce').le(t_date))
             match_pay_diff_tl = m_pay[(m_pay["Fark_TL"] != 0) & mask_pay]["Fark_TL"].sum()
             match_pay_diff_fx = m_pay[(m_pay["Fark_FX"] != 0) & mask_pay]["Fark_FX"].sum()
             
@@ -674,6 +701,8 @@ if "res" in st.session_state:
                     Aradaki toplam <span class="highlight-red">{diff_total:,.2f} TL</span> tutarındaki farkın ana nedenleri:
                 </div>
                 <ul>
+                    <li class="list-item"><b>Devir / Açılış Bakiyesi Farkı:</b> {open_diff_tl:,.2f} TL</li>
+                    <hr>
                     <li class="list-item"><b>Bizde Kayıtlı / Sizde Görünmeyen Faturalar:</b> {miss_them:,.2f} TL</li>
                     <li class="list-item"><b>Sizde Kayıtlı / Bizde Görünmeyen Faturalar:</b> {miss_us:,.2f} TL</li>
                     <hr>
