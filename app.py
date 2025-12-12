@@ -464,7 +464,7 @@ def force_suffix(df, suffix, key_col):
 
 with st.sidebar:
     # --- LOGO (BÜYÜK) ---
-    st.markdown('<div class="logo-text">RecoMatch 🛡️</div>', unsafe_allow_html=True)
+    st.markdown('<div class="logo-text">Reco-Match 🛡️</div>', unsafe_allow_html=True)
     
     role = st.selectbox("Bizim Rolümüz", ["Biz Alıcı", "Biz Satıcı"])
     st.divider()
@@ -764,3 +764,4 @@ if "res" in st.session_state:
         res["pay_match"].to_excel(writer, sheet_name='Odeme_Eslesme', index=False)
         writer.close()
         st.download_button("Excel İndir", output.getvalue(), "RecoMatch_Rapor.xlsx")
+
