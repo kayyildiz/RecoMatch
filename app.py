@@ -421,6 +421,13 @@ with st.sidebar:
     st.header("RecoMatch 🛡️")
     role = st.selectbox("Bizim Rolümüz", ["Biz Alıcı", "Biz Satıcı"])
     st.divider()
+    
+    # DEVİR BAKİYESİ SEÇENEĞİ (YENİ)
+    calc_opening = st.checkbox("Geçmiş Dönem Bakiyesini (Devir) Hesapla", value=True)
+    if calc_opening:
+        opening_date = st.date_input("Analiz Başlangıç Tarihi (Bu tarihten öncekiler Devir Bakiyesi olur)", value=date(date.today().year, 1, 1))
+
+    st.divider()
     files_our = st.file_uploader("Bizim Ekstreler", accept_multiple_files=True)
     files_their = st.file_uploader("Karşı Taraf Ekstreler", accept_multiple_files=True)
     st.divider()
@@ -437,16 +444,6 @@ if files_our and files_their:
         saved_our = TemplateManager.find_best_match(files_our[0].name)
         saved_their = TemplateManager.find_best_match(files_their[0].name)
         
-        # PREVIEW
-        with st.expander("👀 Dosya Önizlemeleri (İlk 50 Satır)", expanded=False):
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader("Bizim Taraf")
-                st.dataframe(df_our.head(50))
-            with c2:
-                st.subheader("Karşı Taraf")
-                st.dataframe(df_their.head(50))
-
         c1, c2 = st.columns(2)
         with c1: map_our = render_mapping_ui("Bizim Taraf", df_our, saved_our, "our")
         with c2: map_their = render_mapping_ui("Karşı Taraf", df_their, saved_their, "their")
@@ -464,6 +461,31 @@ if files_our and files_their:
                     prep_our = prepare_data(df_our, map_our, role)
                     role_their = "Biz Satıcı" if role == "Biz Alıcı" else "Biz Alıcı"
                     prep_their = prepare_data(df_their, map_their, role_their)
+                    
+                    # --- DEVİR BAKİYESİ MANTIĞI (YENİ) ---
+                    if calc_opening:
+                        t_open = pd.Timestamp(opening_date)
+                        
+                        # Bizim Taraf: Tarihten öncekileri topla, tek satır yap
+                        mask_open_our = pd.to_datetime(prep_our["std_date"], errors='coerce').lt(t_open)
+                        if mask_open_our.any():
+                            open_bal_tl = prep_our.loc[mask_open_our, "Signed_TL"].sum()
+                            open_bal_fx = prep_our.loc[mask_open_our, "Signed_FX"].sum()
+                            
+                            # Eski kayıtları sil
+                            prep_our = prep_our[~mask_open_our].copy()
+                            
+                            # Yeni Devir Satırı Ekle
+                            new_row = pd.DataFrame([{
+                                "Doc_Category": "DIGER", # Eşleşmeye girmesin, sadece bakiye
+                                "Signed_TL": open_bal_tl,
+                                "Signed_FX": open_bal_fx,
+                                "std_date": t_open,
+                                "PB_Norm": "TL", # Varsayılan
+                                "Kaynak_Dosya": "DEVİR_BAKİYESİ",
+                                map_our["inv_no"]: "AÇILIŞ/DEVİR"
+                            }])
+                            prep_our = pd.concat([new_row, prep_our], ignore_index=True)
 
                     ignored_our = prep_our[prep_our["Doc_Category"] == "DIGER"]
                     ignored_their = prep_their[prep_their["Doc_Category"] == "DIGER"]
@@ -491,13 +513,10 @@ if files_our and files_their:
                     
                     merged_inv = pd.merge(grp_our, grp_their, on="key_invoice_norm", how="outer")
                     
-                    # FARK (Akıllı Çıkarma: Biz - Onlar)
                     def smart_diff(r, col_biz, col_onlar):
                         v1 = r[col_biz] if pd.notna(r[col_biz]) else 0
                         v2 = r[col_onlar] if pd.notna(r[col_onlar]) else 0
-                        # Aynı işaretse çıkar
                         if (v1 > 0 and v2 > 0) or (v1 < 0 and v2 < 0): return v1 - v2
-                        # Zıt işaretse topla
                         return v1 + v2
 
                     merged_inv["Fark_TL"] = merged_inv.apply(lambda r: smart_diff(r, "Signed_TL_Biz", "Signed_TL_Onlar"), axis=1)
@@ -507,8 +526,8 @@ if files_our and files_their:
                     pay_our = prep_our[prep_our["Doc_Category"].str.contains("ODEME")].copy()
                     pay_their = prep_their[prep_their["Doc_Category"].str.contains("ODEME")].copy()
                     
-                    pay_our = pay_our.sort_values(by=["std_date", "Signed_TL", "Orj_Row_Idx"])
-                    pay_their = pay_their.sort_values(by=["std_date", "Signed_TL", "Orj_Row_Idx"])
+                    pay_our = pay_our.sort_values(by=["std_date", "Signed_TL"])
+                    pay_their = pay_their.sort_values(by=["std_date", "Signed_TL"])
 
                     def create_pay_key(df, cfg, scenario):
                         d = df["std_date"].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '0000-00-00')
@@ -613,14 +632,12 @@ if "res" in st.session_state:
             
             # --- DETAY HESAPLAMA ---
             m_inv = res["merged_inv"]
-            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"], errors='coerce').le(t_date) | 
-                        pd.to_datetime(m_inv["std_date_Onlar"], errors='coerce').le(t_date))
+            mask_inv = (pd.to_datetime(m_inv["std_date_Biz"]).le(t_date) | pd.to_datetime(m_inv["std_date_Onlar"]).le(t_date))
             match_inv_diff_tl = m_inv[(m_inv["Fark_TL"] != 0) & mask_inv]["Fark_TL"].sum()
             match_inv_diff_fx = m_inv[(m_inv["Fark_FX"] != 0) & mask_inv]["Fark_FX"].sum()
             
             m_pay = res["merged_pay"]
-            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"], errors='coerce').le(t_date) | 
-                        pd.to_datetime(m_pay["std_date_Onlar"], errors='coerce').le(t_date))
+            mask_pay = (pd.to_datetime(m_pay["std_date_Biz"]).le(t_date) | pd.to_datetime(m_pay["std_date_Onlar"]).le(t_date))
             match_pay_diff_tl = m_pay[(m_pay["Fark_TL"] != 0) & mask_pay]["Fark_TL"].sum()
             match_pay_diff_fx = m_pay[(m_pay["Fark_FX"] != 0) & mask_pay]["Fark_FX"].sum()
             
